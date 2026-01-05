@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,30 +11,22 @@ import (
 	"github.com/sudopromptr/photoscli/internal/models"
 )
 
-var (
-	downloadOutput string
-)
-
 var downloadCmd = &cobra.Command{
 	Use:   "download <uuid>",
-	Short: "Download a photo from iCloud",
-	Long: `Download a photo or video from your iCloud Photos library.
+	Short: "Download a photo from iCloud to the library",
+	Long: `Download a cloud-only photo to its proper location in the Photos library.
 
-For locally available files, copies directly from the Photos library.
-For cloud-only files, uses AppleScript to trigger Photos.app export
-(which forces iCloud download).
+For cloud-only files, triggers Photos.app to download from iCloud.
+The file will be available at its library path (e.g., originals/E/UUID.heic).
 
 Examples:
-  photoscli download E448C88A -o ~/Downloads/
-  photoscli download E448C88A-7F85-4746-AABE-BC594B79BD84`,
+  photoscli download E448C88A`,
 	Args: cobra.ExactArgs(1),
 	RunE: runDownload,
 }
 
 func init() {
 	rootCmd.AddCommand(downloadCmd)
-
-	downloadCmd.Flags().StringVarP(&downloadOutput, "output", "o", ".", "Output directory")
 }
 
 func runDownload(cmd *cobra.Command, args []string) error {
@@ -54,70 +45,45 @@ func runDownload(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("asset not found: %s", identifier)
 	}
 
-	// Ensure output directory exists
-	if err := os.MkdirAll(downloadOutput, 0755); err != nil {
-		return fmt.Errorf("failed to create output directory: %w", err)
-	}
-
-	// Determine output filename (use original filename if available)
-	outputFilename := asset.OriginalFilename
-	if outputFilename == "" {
-		outputFilename = asset.Filename
-	}
-	outputPath := filepath.Join(downloadOutput, outputFilename)
-
-	// Check if already exists
-	if _, err := os.Stat(outputPath); err == nil {
-		return fmt.Errorf("file already exists: %s", outputPath)
-	}
+	// Build library path
+	libraryPath := buildLibraryPath(asset)
 
 	if asset.IsLocallyAvailable() {
-		// Direct copy from library
-		fmt.Printf("Copying local file: %s\n", asset.OriginalFilename)
-		return copyLocalFile(asset, outputPath)
+		fmt.Printf("Already downloaded: %s\n", libraryPath)
+		return nil
 	}
 
-	// Cloud-only: use AppleScript
-	fmt.Printf("Downloading from iCloud via Photos.app: %s\n", outputFilename)
-	return downloadViaAppleScript(asset.UUID, downloadOutput, outputFilename)
+	// Cloud-only: trigger download via AppleScript
+	fmt.Printf("Downloading from iCloud: %s\n", asset.OriginalFilename)
+
+	if err := triggerDownloadToLibrary(asset.UUID); err != nil {
+		return err
+	}
+
+	fmt.Printf("Downloaded to library: %s\n", libraryPath)
+	return nil
 }
 
-func copyLocalFile(asset *models.Asset, outputPath string) error {
-	// Build source path
+func buildLibraryPath(asset *models.Asset) string {
 	dir := asset.Directory
 	if dir == "" && len(asset.UUID) > 0 {
 		dir = string(asset.UUID[0])
 	}
-	srcPath := filepath.Join(getLibraryPath(), "originals", dir, asset.Filename)
-
-	// Check source exists
-	if _, err := os.Stat(srcPath); os.IsNotExist(err) {
-		return fmt.Errorf("source file not found: %s", srcPath)
-	}
-
-	// Copy file
-	src, err := os.Open(srcPath)
-	if err != nil {
-		return fmt.Errorf("failed to open source: %w", err)
-	}
-	defer src.Close()
-
-	dst, err := os.Create(outputPath)
-	if err != nil {
-		return fmt.Errorf("failed to create destination: %w", err)
-	}
-	defer dst.Close()
-
-	bytes, err := io.Copy(dst, src)
-	if err != nil {
-		return fmt.Errorf("failed to copy: %w", err)
-	}
-
-	fmt.Printf("Copied %d bytes to %s\n", bytes, outputPath)
-	return nil
+	return filepath.Join(getLibraryPath(), "originals", dir, asset.Filename)
 }
 
-func downloadViaAppleScript(uuid string, outputDir string, originalFilename string) error {
+func triggerDownloadToLibrary(uuid string) error {
+	// Export to temp directory to trigger iCloud download, then delete the export
+	tempDir, err := os.MkdirTemp("", "photoscli-download-*")
+	if err != nil {
+		return fmt.Errorf("failed to create temp dir: %w", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	return triggerDownloadViaExport(uuid, tempDir)
+}
+
+func triggerDownloadViaExport(uuid string, outputDir string) error {
 	// Convert to absolute path for AppleScript
 	absOutput, err := filepath.Abs(outputDir)
 	if err != nil {
@@ -140,7 +106,5 @@ end tell
 		return fmt.Errorf("AppleScript export failed: %s: %w", string(output), err)
 	}
 
-	// Photos.app may change the extension (e.g., HEIC -> jpeg)
-	fmt.Printf("Downloaded to %s/%s (Photos.app may change format)\n", absOutput, originalFilename)
 	return nil
 }
