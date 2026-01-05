@@ -78,8 +78,8 @@ func runDownload(cmd *cobra.Command, args []string) error {
 	}
 
 	// Cloud-only: use AppleScript
-	fmt.Printf("Downloading from iCloud via Photos.app: %s\n", asset.OriginalFilename)
-	return downloadViaAppleScript(asset.UUID, downloadOutput)
+	fmt.Printf("Downloading from iCloud via Photos.app: %s\n", outputFilename)
+	return downloadViaAppleScript(asset.UUID, downloadOutput, outputFilename)
 }
 
 func copyLocalFile(asset *models.Asset, outputPath string) error {
@@ -117,7 +117,7 @@ func copyLocalFile(asset *models.Asset, outputPath string) error {
 	return nil
 }
 
-func downloadViaAppleScript(uuid string, outputDir string) error {
+func downloadViaAppleScript(uuid string, outputDir string, originalFilename string) error {
 	// Convert to absolute path for AppleScript
 	absOutput, err := filepath.Abs(outputDir)
 	if err != nil {
@@ -140,6 +140,7 @@ end tell
 		return fmt.Errorf("AppleScript export failed: %s: %w", string(output), err)
 	}
 
-	fmt.Printf("Downloaded to %s/\n", absOutput)
+	// Photos.app may change the extension (e.g., HEIC -> jpeg)
+	fmt.Printf("Downloaded to %s/%s (Photos.app may change format)\n", absOutput, originalFilename)
 	return nil
 }
