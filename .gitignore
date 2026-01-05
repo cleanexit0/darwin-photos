@@ -1,0 +1,9 @@
+# Binary
+photoscli
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store

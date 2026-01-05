@@ -1,0 +1,241 @@
+package cmd
+
+import (
+	"encoding/json"
+	"fmt"
+	"path/filepath"
+
+	"github.com/dustin/go-humanize"
+	"github.com/spf13/cobra"
+	"github.com/sudopromptr/photoscli/internal/db"
+	"github.com/sudopromptr/photoscli/internal/models"
+)
+
+var (
+	catJSON bool
+)
+
+var catCmd = &cobra.Command{
+	Use:   "cat <uuid-or-filename>",
+	Short: "Show detailed information about a photo",
+	Long: `Display detailed metadata for a specific photo or video.
+
+You can specify either:
+- Full UUID (e.g., 4D507F5C-E9DE-41C4-80B5-008D3D4B352C)
+- Partial UUID (e.g., 4D507F5C)
+- Filename (e.g., IMG_1234.HEIC)`,
+	Args: cobra.ExactArgs(1),
+	RunE: runCat,
+}
+
+func init() {
+	rootCmd.AddCommand(catCmd)
+
+	catCmd.Flags().BoolVar(&catJSON, "json", false, "Output as JSON")
+}
+
+func runCat(cmd *cobra.Command, args []string) error {
+	identifier := args[0]
+
+	// Open database
+	photosDB, err := db.Open(getLibraryPath())
+	if err != nil {
+		return fmt.Errorf("failed to open Photos database: %w", err)
+	}
+	defer photosDB.Close()
+
+	// Find asset
+	asset, err := db.GetAssetByUUID(photosDB.DB(), identifier)
+	if err != nil {
+		return fmt.Errorf("asset not found: %s", identifier)
+	}
+
+	// Get extended attributes (EXIF)
+	ext, _ := db.GetExtendedAttributes(photosDB.DB(), asset.PK)
+
+	// Get albums
+	albums, _ := db.GetAlbumsForAsset(photosDB.DB(), asset.PK)
+
+	if catJSON {
+		return outputJSON(asset, ext, albums)
+	}
+
+	return outputFormatted(asset, ext, albums)
+}
+
+func outputJSON(asset *models.Asset, ext *models.ExtendedAttributes, albums []*models.Album) error {
+	output := map[string]interface{}{
+		"uuid":             asset.UUID,
+		"filename":         asset.Filename,
+		"originalFilename": asset.OriginalFilename,
+		"type":             asset.TypeString(),
+		"uniformTypeId":    asset.UniformTypeID,
+		"dimensions": map[string]int{
+			"width":  asset.Width,
+			"height": asset.Height,
+		},
+		"fileSize":    asset.FileSize,
+		"dateCreated": asset.DateCreated,
+		"favorite":    asset.Favorite,
+		"hidden":      asset.Hidden,
+		"trashed":     asset.Trashed,
+		"status":      asset.StatusString(),
+		"localPath":   buildLocalPath(asset),
+	}
+
+	if asset.Latitude != 0 || asset.Longitude != 0 {
+		output["location"] = map[string]float64{
+			"latitude":  asset.Latitude,
+			"longitude": asset.Longitude,
+		}
+	}
+
+	if asset.Duration > 0 {
+		output["duration"] = asset.Duration
+	}
+
+	if ext != nil {
+		camera := map[string]interface{}{}
+		if ext.CameraMake != "" {
+			camera["make"] = ext.CameraMake
+		}
+		if ext.CameraModel != "" {
+			camera["model"] = ext.CameraModel
+		}
+		if ext.LensModel != "" {
+			camera["lens"] = ext.LensModel
+		}
+		if ext.ISO > 0 {
+			camera["iso"] = ext.ISO
+		}
+		if ext.Aperture > 0 {
+			camera["aperture"] = ext.Aperture
+		}
+		if ext.ShutterSpeed > 0 {
+			camera["shutterSpeed"] = ext.ShutterSpeed
+		}
+		if ext.FocalLength > 0 {
+			camera["focalLength"] = ext.FocalLength
+		}
+		if len(camera) > 0 {
+			output["camera"] = camera
+		}
+	}
+
+	if len(albums) > 0 {
+		albumNames := make([]string, len(albums))
+		for i, alb := range albums {
+			albumNames[i] = alb.Title
+		}
+		output["albums"] = albumNames
+	}
+
+	enc := json.NewEncoder(nil)
+	enc.SetIndent("", "  ")
+
+	data, err := json.MarshalIndent(output, "", "  ")
+	if err != nil {
+		return err
+	}
+	fmt.Println(string(data))
+	return nil
+}
+
+func outputFormatted(asset *models.Asset, ext *models.ExtendedAttributes, albums []*models.Album) error {
+	fmt.Println("=== Photo Details ===")
+	fmt.Println()
+
+	fmt.Printf("UUID:               %s\n", asset.UUID)
+	if asset.OriginalFilename != "" {
+		fmt.Printf("Original Filename:  %s\n", asset.OriginalFilename)
+	}
+	fmt.Printf("Current Filename:   %s\n", asset.Filename)
+	fmt.Printf("Type:               %s (%s)\n", asset.TypeString(), asset.UniformTypeID)
+	fmt.Printf("Dimensions:         %d x %d\n", asset.Width, asset.Height)
+	fmt.Printf("File Size:          %s (%d bytes)\n", humanize.Bytes(uint64(asset.FileSize)), asset.FileSize)
+	if !asset.DateCreated.IsZero() {
+		fmt.Printf("Date Created:       %s\n", asset.DateCreated.Format("2006-01-02 15:04:05"))
+	}
+	if !asset.DateModified.IsZero() {
+		fmt.Printf("Date Modified:      %s\n", asset.DateModified.Format("2006-01-02 15:04:05"))
+	}
+	if asset.Duration > 0 {
+		fmt.Printf("Duration:           %.1f seconds\n", asset.Duration)
+	}
+	fmt.Printf("Favorite:           %s\n", boolToYesNo(asset.Favorite))
+	fmt.Printf("Hidden:             %s\n", boolToYesNo(asset.Hidden))
+	fmt.Printf("Trashed:            %s\n", boolToYesNo(asset.Trashed))
+
+	if asset.Latitude != 0 || asset.Longitude != 0 {
+		fmt.Println()
+		fmt.Println("=== Location ===")
+		fmt.Printf("Latitude:           %.6f\n", asset.Latitude)
+		fmt.Printf("Longitude:          %.6f\n", asset.Longitude)
+	}
+
+	if ext != nil && (ext.CameraMake != "" || ext.CameraModel != "") {
+		fmt.Println()
+		fmt.Println("=== Camera Info ===")
+		if ext.CameraMake != "" {
+			fmt.Printf("Make:               %s\n", ext.CameraMake)
+		}
+		if ext.CameraModel != "" {
+			fmt.Printf("Model:              %s\n", ext.CameraModel)
+		}
+		if ext.LensModel != "" {
+			fmt.Printf("Lens:               %s\n", ext.LensModel)
+		}
+		if ext.ISO > 0 {
+			fmt.Printf("ISO:                %d\n", ext.ISO)
+		}
+		if ext.Aperture > 0 {
+			fmt.Printf("Aperture:           f/%.1f\n", ext.Aperture)
+		}
+		if ext.ShutterSpeed > 0 {
+			if ext.ShutterSpeed < 1 {
+				fmt.Printf("Shutter Speed:      1/%.0f\n", 1/ext.ShutterSpeed)
+			} else {
+				fmt.Printf("Shutter Speed:      %.1fs\n", ext.ShutterSpeed)
+			}
+		}
+		if ext.FocalLength > 0 {
+			fmt.Printf("Focal Length:       %.1fmm\n", ext.FocalLength)
+		}
+	}
+
+	fmt.Println()
+	fmt.Println("=== Storage Status ===")
+	fmt.Printf("Local Availability: %s\n", asset.StatusString())
+	localPath := buildLocalPath(asset)
+	if asset.IsLocallyAvailable() {
+		fmt.Printf("Local Path:         %s\n", localPath)
+	} else {
+		fmt.Printf("Expected Path:      %s (not downloaded)\n", localPath)
+	}
+
+	if len(albums) > 0 {
+		fmt.Println()
+		fmt.Println("=== Albums ===")
+		for _, alb := range albums {
+			fmt.Printf("- %s\n", alb.Title)
+		}
+	}
+
+	return nil
+}
+
+func buildLocalPath(asset *models.Asset) string {
+	libraryPath := getLibraryPath()
+	dir := asset.Directory
+	if dir == "" && len(asset.UUID) > 0 {
+		dir = string(asset.UUID[0])
+	}
+	return filepath.Join(libraryPath, "originals", dir, asset.Filename)
+}
+
+func boolToYesNo(b bool) string {
+	if b {
+		return "Yes"
+	}
+	return "No"
+}
