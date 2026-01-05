@@ -52,6 +52,7 @@ type ListOptions struct {
 // ListAssets returns a list of assets based on the options
 func ListAssets(db *sql.DB, opts ListOptions) ([]*models.Asset, int, error) {
 	// Build the query - use subquery to get the largest resource (original) per asset
+	// Note: CAST timestamps AS REAL to prevent sqlite3 driver from auto-converting to time.Time
 	query := `
 SELECT
     a.Z_PK,
@@ -66,8 +67,8 @@ SELECT
     a.ZHIDDEN,
     a.ZTRASHEDSTATE,
     a.ZCLOUDLOCALSTATE,
-    a.ZDATECREATED,
-    a.ZMODIFICATIONDATE,
+    CAST(a.ZDATECREATED AS REAL),
+    CAST(a.ZMODIFICATIONDATE AS REAL),
     a.ZLATITUDE,
     a.ZLONGITUDE,
     a.ZDURATION,
@@ -234,6 +235,7 @@ WHERE 1=1
 
 // GetAssetByUUID returns a single asset by UUID
 func GetAssetByUUID(db *sql.DB, uuid string) (*models.Asset, error) {
+	// Note: CAST timestamps AS REAL to prevent sqlite3 driver from auto-converting to time.Time
 	query := `
 SELECT
     a.Z_PK,
@@ -248,8 +250,8 @@ SELECT
     a.ZHIDDEN,
     a.ZTRASHEDSTATE,
     a.ZCLOUDLOCALSTATE,
-    a.ZDATECREATED,
-    a.ZMODIFICATIONDATE,
+    CAST(a.ZDATECREATED AS REAL),
+    CAST(a.ZMODIFICATIONDATE AS REAL),
     a.ZLATITUDE,
     a.ZLONGITUDE,
     a.ZDURATION,
