@@ -454,6 +454,44 @@ WHERE (rel.Z_3ASSETS = ? OR rel.Z_26ASSETS = ? OR rel.Z_27ASSETS = ? OR rel.Z_28
 	return albums, nil
 }
 
+// GetCloudMasterGUID returns the CloudKit GUID for an asset UUID
+// This is needed because Photos.sqlite UUID != CloudKit recordName
+func GetCloudMasterGUID(db *sql.DB, uuid string) (string, error) {
+	query := `
+SELECT cm.ZCLOUDMASTERGUID
+FROM ZASSET a
+JOIN ZCLOUDMASTER cm ON a.ZMASTER = cm.Z_PK
+WHERE a.ZUUID = ? OR a.ZUUID LIKE ?
+LIMIT 1
+`
+	var guid sql.NullString
+	err := db.QueryRow(query, uuid, uuid+"%").Scan(&guid)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return "", fmt.Errorf("no CloudKit GUID found for UUID: %s", uuid)
+		}
+		return "", err
+	}
+	if !guid.Valid || guid.String == "" {
+		return "", fmt.Errorf("CloudKit GUID is empty for UUID: %s", uuid)
+	}
+	return guid.String, nil
+}
+
+// GetCloudMasterGUIDs returns CloudKit GUIDs for multiple asset UUIDs
+func GetCloudMasterGUIDs(db *sql.DB, uuids []string) (map[string]string, error) {
+	result := make(map[string]string)
+	for _, uuid := range uuids {
+		guid, err := GetCloudMasterGUID(db, uuid)
+		if err != nil {
+			// Skip assets without CloudKit GUIDs
+			continue
+		}
+		result[uuid] = guid
+	}
+	return result, nil
+}
+
 // GetStats returns library statistics
 func GetStats(db *sql.DB) (total, local, cloud int, err error) {
 	err = db.QueryRow(`

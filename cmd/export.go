@@ -1,0 +1,502 @@
+package cmd
+
+import (
+	"bufio"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/spf13/cobra"
+	"github.com/sudopromptr/photoscli/internal/db"
+	"github.com/sudopromptr/photoscli/internal/icloud"
+)
+
+var (
+	exportAll     bool
+	exportWorkers int
+	exportLimit   int
+	exportFile    string
+)
+
+var exportCmd = &cobra.Command{
+	Use:   "export [uuid] | --file <path> | - | --all <output-dir>",
+	Short: "Export photos directly from iCloud to a directory",
+	Long: `Export photos directly from iCloud to a directory, bypassing local Photos library.
+
+This downloads photos directly from iCloud servers, allowing you to export to
+external storage without filling up local disk space.
+
+Setup (import cookies from your browser):
+  1. Log into icloud.com or icloud.com.cn in Chrome
+  2. Open DevTools Network tab, find any request to p*-ckdatabasews.icloud.com{.cn}
+  3. Note the partition number (e.g., p227)
+  4. Use a cookie export extension to save cookies (Netscape format)
+  5. Run: photoscli export import-cookies cookies.txt https://p{N}-ckdatabasews.icloud.com{.cn}
+
+Example:
+  photoscli export import-cookies cookies.txt https://p227-ckdatabasews.icloud.com.cn
+
+Commands:
+  photoscli export import-cookies <file> <photos-url>  # Import browser cookies
+  photoscli export logout                              # Clear saved session
+
+Single export:
+  photoscli export E448C88A /Volumes/Backup
+
+From file (one UUID per line):
+  photoscli export --file uuids.txt /Volumes/Backup
+
+From stdin:
+  cat uuids.txt | photoscli export - /Volumes/Backup
+
+Export all cloud-only photos:
+  photoscli export --all /Volumes/Backup
+  photoscli export --all --workers 4 /Volumes/Backup
+  photoscli export --all --limit 100 /Volumes/Backup`,
+	Args: cobra.MinimumNArgs(1),
+	RunE: runExport,
+}
+
+func init() {
+	rootCmd.AddCommand(exportCmd)
+	exportCmd.Flags().BoolVar(&exportAll, "all", false, "Export all cloud-only photos")
+	exportCmd.Flags().StringVarP(&exportFile, "file", "f", "", "File containing UUIDs (one per line)")
+	exportCmd.Flags().IntVarP(&exportWorkers, "workers", "w", 4, "Number of parallel workers")
+	exportCmd.Flags().IntVarP(&exportLimit, "limit", "n", 0, "Limit number of photos to export (0 = unlimited)")
+}
+
+func runExport(cmd *cobra.Command, args []string) error {
+	// Handle subcommands
+	if len(args) >= 1 {
+		switch args[0] {
+		case "logout":
+			return runExportLogout()
+		case "import-cookies":
+			if len(args) < 3 {
+				return fmt.Errorf("import-cookies requires: <cookie-file> <photos-url>\nExample: photoscli export import-cookies cookies.txt https://p227-ckdatabasews.icloud.com.cn")
+			}
+			return runImportCookies(args[1], args[2])
+		}
+	}
+
+	// All other modes need an output directory
+	var outputDir string
+	var uuids []string
+
+	if exportAll {
+		if len(args) != 1 {
+			return fmt.Errorf("--all requires output directory")
+		}
+		outputDir = args[0]
+		return runExportAll(outputDir)
+	}
+
+	if exportFile != "" {
+		if len(args) != 1 {
+			return fmt.Errorf("--file requires output directory")
+		}
+		outputDir = args[0]
+		var err error
+		uuids, err = readExportUUIDs(exportFile)
+		if err != nil {
+			return err
+		}
+		return runExportList(uuids, outputDir)
+	}
+
+	if len(args) == 2 && args[0] == "-" {
+		outputDir = args[1]
+		var err error
+		uuids, err = readExportUUIDsFromStdin()
+		if err != nil {
+			return err
+		}
+		return runExportList(uuids, outputDir)
+	}
+
+	// Single UUID mode
+	if len(args) != 2 {
+		return fmt.Errorf("requires UUID and output directory, or use --all/--file")
+	}
+	return runExportList([]string{args[0]}, args[1])
+}
+
+func runExportLogout() error {
+	sessionPath := icloud.DefaultSessionPath()
+	if err := icloud.ClearSession(sessionPath); err != nil {
+		return err
+	}
+	fmt.Println("Logged out successfully.")
+	return nil
+}
+
+func runImportCookies(cookieFile, photosURL string) error {
+	// Parse cookie file (Netscape/Mozilla format)
+	data, err := os.ReadFile(cookieFile)
+	if err != nil {
+		return fmt.Errorf("failed to read cookie file: %w", err)
+	}
+
+	content := string(data)
+
+	// Parse ALL cookies from Netscape format
+	// Format: domain	flag	path	secure	expiration	name	value
+	var cookies []*icloud.ImportedCookie
+	var numericDsid string
+	var hasToken bool
+
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		parts := strings.Split(line, "\t")
+		if len(parts) >= 7 {
+			domain := parts[0]
+			path := parts[2]
+			secure := parts[3] == "TRUE"
+			name := parts[5]
+			value := parts[6]
+
+			// Strip quotes from cookie values (some exports include them)
+			value = strings.Trim(value, `"`)
+
+			// Only import cookies for iCloud domains
+			if !strings.Contains(domain, "icloud") && !strings.Contains(domain, "apple") {
+				continue
+			}
+
+			cookie := &icloud.ImportedCookie{
+				Domain: domain,
+				Path:   path,
+				Secure: secure,
+				Name:   name,
+				Value:  value,
+			}
+			cookies = append(cookies, cookie)
+
+			// Extract numeric DSID from X-APPLE-WEBAUTH-USER
+			if name == "X-APPLE-WEBAUTH-USER" && strings.Contains(value, "d=") {
+				dsidParts := strings.Split(value, "d=")
+				if len(dsidParts) > 1 {
+					numericDsid = strings.TrimSpace(dsidParts[1])
+				}
+			}
+
+			// Check if we have the main auth token
+			if name == "X-APPLE-WEBAUTH-TOKEN" {
+				hasToken = true
+			}
+		}
+	}
+
+	if len(cookies) == 0 {
+		return fmt.Errorf("no iCloud cookies found in cookie file")
+	}
+
+	if !hasToken {
+		return fmt.Errorf("X-APPLE-WEBAUTH-TOKEN not found in cookie file")
+	}
+
+	// Create client and import cookies
+	client, err := icloud.NewClient()
+	if err != nil {
+		return err
+	}
+
+	// Set the Photos URL first (needed for cookie import to target correct domain)
+	client.PhotosURL = photosURL
+
+	// Import all cookies
+	client.ImportCookies(cookies)
+
+	// Set DSID if found
+	if numericDsid != "" {
+		client.Dsid = numericDsid
+	}
+
+	// Save session
+	sessionPath := icloud.DefaultSessionPath()
+	if err := client.SaveSession(sessionPath); err != nil {
+		return fmt.Errorf("failed to save session: %w", err)
+	}
+
+	fmt.Println("Cookies imported successfully!")
+	fmt.Printf("Session saved to: %s\n", sessionPath)
+	fmt.Printf("Photos URL: %s\n", photosURL)
+	fmt.Printf("Imported %d cookies\n", len(cookies))
+	if numericDsid != "" {
+		fmt.Printf("DSID: %s\n", numericDsid)
+	}
+
+	// List important cookies found
+	importantCookies := []string{
+		"X-APPLE-WEBAUTH-TOKEN",
+		"X-APPLE-WEBAUTH-USER",
+		"X-APPLE-WEBAUTH-PCS-Photos",
+		"X-APPLE-WEBAUTH-PCS-Cloudkit",
+		"X-APPLE-DS-WEB-SESSION-TOKEN",
+	}
+	for _, name := range importantCookies {
+		for _, c := range cookies {
+			if c.Name == name {
+				fmt.Printf("  Found: %s (len=%d)\n", name, len(c.Value))
+				break
+			}
+		}
+	}
+
+	return nil
+}
+
+func getICloudClient() (*icloud.Client, error) {
+	client, err := icloud.NewClient()
+	if err != nil {
+		return nil, err
+	}
+
+	sessionPath := icloud.DefaultSessionPath()
+	if err := client.LoadSession(sessionPath); err != nil {
+		return nil, fmt.Errorf("not logged in. Run 'photoscli export login' first")
+	}
+
+	if !client.IsLoggedIn() {
+		return nil, fmt.Errorf("session expired. Run 'photoscli export login' to re-authenticate")
+	}
+
+	return client, nil
+}
+
+func runExportAll(outputDir string) error {
+	if err := validateExportDir(outputDir); err != nil {
+		return err
+	}
+
+	client, err := getICloudClient()
+	if err != nil {
+		return err
+	}
+
+	// Get cloud-only assets from local database
+	photosDB, err := db.Open(getLibraryPath())
+	if err != nil {
+		return fmt.Errorf("failed to open Photos database: %w", err)
+	}
+	defer photosDB.Close()
+
+	opts := db.ListOptions{
+		CloudOnly: true,
+		Limit:     exportLimit,
+	}
+	assets, total, err := db.ListAssets(photosDB.DB(), opts)
+	if err != nil {
+		return fmt.Errorf("failed to list assets: %w", err)
+	}
+
+	if len(assets) == 0 {
+		fmt.Println("No cloud-only photos to export")
+		return nil
+	}
+
+	// Extract UUIDs
+	uuids := make([]string, len(assets))
+	for i, asset := range assets {
+		uuids[i] = asset.UUID
+	}
+
+	if exportLimit > 0 && exportLimit < total {
+		fmt.Printf("Exporting %d of %d cloud-only photos (limited)\n", len(uuids), total)
+	} else {
+		fmt.Printf("Exporting %d cloud-only photos\n", len(uuids))
+	}
+
+	return exportPhotos(client, uuids, outputDir)
+}
+
+func runExportList(uuids []string, outputDir string) error {
+	if err := validateExportDir(outputDir); err != nil {
+		return err
+	}
+
+	client, err := getICloudClient()
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("Exporting %d photos\n", len(uuids))
+	return exportPhotos(client, uuids, outputDir)
+}
+
+type exportJob struct {
+	uuid         string
+	cloudKitGUID string
+}
+
+type exportResult struct {
+	uuid     string
+	filename string
+	err      error
+}
+
+func exportPhotos(client *icloud.Client, uuids []string, outputDir string) error {
+	// Open Photos database to look up CloudKit GUIDs
+	photosDB, err := db.Open(getLibraryPath())
+	if err != nil {
+		return fmt.Errorf("failed to open Photos database: %w", err)
+	}
+	defer photosDB.Close()
+
+	// Map UUIDs to CloudKit GUIDs
+	fmt.Println("Looking up CloudKit GUIDs...")
+	guidMap, err := db.GetCloudMasterGUIDs(photosDB.DB(), uuids)
+	if err != nil {
+		return fmt.Errorf("failed to look up CloudKit GUIDs: %w", err)
+	}
+
+	// Filter to only UUIDs that have CloudKit GUIDs
+	var validJobs []exportJob
+	for _, uuid := range uuids {
+		if guid, ok := guidMap[uuid]; ok {
+			validJobs = append(validJobs, exportJob{uuid: uuid, cloudKitGUID: guid})
+		} else {
+			fmt.Printf("Warning: No CloudKit GUID found for %s (may be local-only)\n", uuid)
+		}
+	}
+
+	if len(validJobs) == 0 {
+		return fmt.Errorf("no valid CloudKit GUIDs found for the given UUIDs")
+	}
+
+	count := len(validJobs)
+	fmt.Printf("Found %d photos with CloudKit GUIDs\n", count)
+	fmt.Printf("Using %d workers\n\n", exportWorkers)
+
+	jobs := make(chan exportJob, count)
+	results := make(chan exportResult, count)
+
+	var wg sync.WaitGroup
+	for w := 0; w < exportWorkers; w++ {
+		wg.Add(1)
+		go exportWorker(client, outputDir, jobs, results, &wg)
+	}
+
+	for _, job := range validJobs {
+		jobs <- job
+	}
+	close(jobs)
+
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	var completed, succeeded, failed int64
+	startTime := time.Now()
+
+	for result := range results {
+		completed++
+		if result.err != nil {
+			atomic.AddInt64(&failed, 1)
+			fmt.Printf("[%d/%d] FAILED: %s - %v\n", completed, count, result.uuid, result.err)
+		} else {
+			atomic.AddInt64(&succeeded, 1)
+			fmt.Printf("[%d/%d] OK: %s\n", completed, count, result.filename)
+		}
+	}
+
+	elapsed := time.Since(startTime)
+	fmt.Printf("\nCompleted in %s\n", elapsed.Round(time.Millisecond))
+	fmt.Printf("  Succeeded: %d\n", succeeded)
+	if failed > 0 {
+		fmt.Printf("  Failed:    %d\n", failed)
+	}
+
+	if failed > 0 {
+		return fmt.Errorf("%d exports failed", failed)
+	}
+	return nil
+}
+
+func exportWorker(client *icloud.Client, outputDir string, jobs <-chan exportJob, results chan<- exportResult, wg *sync.WaitGroup) {
+	defer wg.Done()
+
+	for job := range jobs {
+		// Get download URL from iCloud using CloudKit GUID
+		asset, err := client.GetDownloadURL(job.cloudKitGUID)
+		if err != nil {
+			results <- exportResult{uuid: job.uuid, err: err}
+			continue
+		}
+
+		filename := asset.Filename
+		if filename == "" {
+			filename = job.uuid // Fall back to UUID if no filename
+		}
+
+		outputPath := filepath.Join(outputDir, filename)
+
+		// Check if file exists
+		if _, err := os.Stat(outputPath); err == nil {
+			results <- exportResult{uuid: job.uuid, filename: filename, err: fmt.Errorf("file already exists")}
+			continue
+		}
+
+		// Download
+		if err := client.DownloadPhoto(asset.DownloadURL, outputPath); err != nil {
+			results <- exportResult{uuid: job.uuid, err: err}
+			continue
+		}
+
+		results <- exportResult{uuid: job.uuid, filename: filename}
+	}
+}
+
+func validateExportDir(outputDir string) error {
+	info, err := os.Stat(outputDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("output directory does not exist: %s", outputDir)
+		}
+		return fmt.Errorf("cannot access output directory: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("output path is not a directory: %s", outputDir)
+	}
+	return nil
+}
+
+func readExportUUIDs(path string) ([]string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open file: %w", err)
+	}
+	defer file.Close()
+
+	return parseExportUUIDs(bufio.NewScanner(file))
+}
+
+func readExportUUIDsFromStdin() ([]string, error) {
+	return parseExportUUIDs(bufio.NewScanner(os.Stdin))
+}
+
+func parseExportUUIDs(scanner *bufio.Scanner) ([]string, error) {
+	var uuids []string
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		uuids = append(uuids, line)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("failed to read input: %w", err)
+	}
+	if len(uuids) == 0 {
+		return nil, fmt.Errorf("no UUIDs found in input")
+	}
+	return uuids, nil
+}
