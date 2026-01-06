@@ -480,25 +480,26 @@ LIMIT 1
 }
 
 // GetCloudMasterGUIDs returns CloudKit GUIDs for multiple asset UUIDs in a single query
+// Supports both full UUIDs and short prefixes (e.g., "E395FF92" matches "E395FF92-6C1F-46FD-...")
 func GetCloudMasterGUIDs(db *sql.DB, uuids []string) (map[string]string, error) {
 	if len(uuids) == 0 {
 		return make(map[string]string), nil
 	}
 
-	// Build placeholders for IN clause
-	placeholders := make([]string, len(uuids))
-	args := make([]interface{}, len(uuids))
+	// Build OR conditions for each UUID (support both exact and prefix match)
+	conditions := make([]string, len(uuids))
+	args := make([]interface{}, 0, len(uuids)*2)
 	for i, uuid := range uuids {
-		placeholders[i] = "?"
-		args[i] = uuid
+		conditions[i] = "(a.ZUUID = ? OR a.ZUUID LIKE ?)"
+		args = append(args, uuid, uuid+"%")
 	}
 
 	query := fmt.Sprintf(`
 SELECT a.ZUUID, cm.ZCLOUDMASTERGUID
 FROM ZASSET a
 JOIN ZCLOUDMASTER cm ON a.ZMASTER = cm.Z_PK
-WHERE a.ZUUID IN (%s) AND cm.ZCLOUDMASTERGUID IS NOT NULL AND cm.ZCLOUDMASTERGUID != ''
-`, strings.Join(placeholders, ","))
+WHERE (%s) AND cm.ZCLOUDMASTERGUID IS NOT NULL AND cm.ZCLOUDMASTERGUID != ''
+`, strings.Join(conditions, " OR "))
 
 	rows, err := db.Query(query, args...)
 	if err != nil {
@@ -506,13 +507,20 @@ WHERE a.ZUUID IN (%s) AND cm.ZCLOUDMASTERGUID IS NOT NULL AND cm.ZCLOUDMASTERGUI
 	}
 	defer rows.Close()
 
+	// Map full UUIDs back to the input (possibly short) UUIDs
 	result := make(map[string]string)
 	for rows.Next() {
-		var uuid, guid string
-		if err := rows.Scan(&uuid, &guid); err != nil {
+		var fullUUID, guid string
+		if err := rows.Scan(&fullUUID, &guid); err != nil {
 			return nil, err
 		}
-		result[uuid] = guid
+		// Find which input UUID this matches
+		for _, inputUUID := range uuids {
+			if fullUUID == inputUUID || strings.HasPrefix(fullUUID, inputUUID) {
+				result[inputUUID] = guid
+				break
+			}
+		}
 	}
 	return result, rows.Err()
 }
