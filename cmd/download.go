@@ -17,14 +17,14 @@ import (
 )
 
 var (
-	downloadBatch   bool
+	downloadAll   bool
 	downloadWorkers int
 	downloadLimit   int
 	downloadFile    string
 )
 
 var downloadCmd = &cobra.Command{
-	Use:   "download [uuid] | --file <path> | - | --batch",
+	Use:   "download [uuid] | --file <path> | - | --all",
 	Short: "Download cloud photos to the Photos library",
 	Long: `Download cloud-only photos from iCloud to the Photos library.
 
@@ -41,17 +41,17 @@ From stdin:
   cat uuids.txt | photoscli download -
   photoscli download - < uuids.txt
 
-Batch download (all cloud-only photos):
-  photoscli download --batch
-  photoscli download --batch --workers 4
-  photoscli download --batch --limit 100`,
+Download all cloud-only photos:
+  photoscli download --all
+  photoscli download --all --workers 4
+  photoscli download --all --limit 100`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runDownload,
 }
 
 func init() {
 	rootCmd.AddCommand(downloadCmd)
-	downloadCmd.Flags().BoolVar(&downloadBatch, "batch", false, "Download all cloud-only photos")
+	downloadCmd.Flags().BoolVar(&downloadAll, "all", false, "Download all cloud-only photos")
 	downloadCmd.Flags().StringVarP(&downloadFile, "file", "f", "", "File containing UUIDs (one per line)")
 	downloadCmd.Flags().IntVarP(&downloadWorkers, "workers", "w", 4, "Number of parallel workers")
 	downloadCmd.Flags().IntVarP(&downloadLimit, "limit", "n", 0, "Limit number of photos to download (0 = unlimited)")
@@ -59,9 +59,9 @@ func init() {
 
 func runDownload(cmd *cobra.Command, args []string) error {
 	// Batch mode: all cloud-only photos
-	if downloadBatch {
+	if downloadAll {
 		if len(args) != 0 || downloadFile != "" {
-			return fmt.Errorf("--batch cannot be combined with UUID or --file")
+			return fmt.Errorf("--all cannot be combined with UUID or --file")
 		}
 		return runBatchDownload()
 	}
