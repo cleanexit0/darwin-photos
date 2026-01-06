@@ -22,7 +22,7 @@ type Session struct {
 // DefaultSessionPath returns the default session file path.
 func DefaultSessionPath() string {
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".photoscli", "session.json")
+	return filepath.Join(home, ".darwin-photos", "session.json")
 }
 
 // SaveSession saves the client's session state to a file.

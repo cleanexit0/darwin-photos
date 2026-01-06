@@ -11,9 +11,9 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/sudopromptr/photoscli/internal/db"
-	"github.com/sudopromptr/photoscli/internal/models"
-	"github.com/sudopromptr/photoscli/internal/photokit"
+	"github.com/cleanexit0/darwin-photos/internal/db"
+	"github.com/cleanexit0/darwin-photos/internal/models"
+	"github.com/cleanexit0/darwin-photos/internal/photokit"
 )
 
 var (
@@ -32,19 +32,19 @@ Uses PhotoKit to trigger iCloud sync. The photos are stored in the
 Photos library, making them available locally.
 
 Single sync:
-  photoscli sync E448C88A
+  darwin-photos sync E448C88A
 
 From file (one UUID per line):
-  photoscli sync --file uuids.txt
+  darwin-photos sync --file uuids.txt
 
 From stdin:
-  cat uuids.txt | photoscli sync -
-  photoscli sync - < uuids.txt
+  cat uuids.txt | darwin-photos sync -
+  darwin-photos sync - < uuids.txt
 
 Sync all cloud-only photos:
-  photoscli sync --all
-  photoscli sync --all --workers 4
-  photoscli sync --all --limit 100`,
+  darwin-photos sync --all
+  darwin-photos sync --all --workers 4
+  darwin-photos sync --all --limit 100`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runSync,
 }
@@ -156,7 +156,7 @@ func syncWorker(jobs <-chan *models.Asset, results chan<- syncResult, wg *sync.W
 
 func syncViaPhotoKit(asset *models.Asset) error {
 	// Create temp directory for the sync
-	tempDir, err := os.MkdirTemp("", "photoscli-sync-*")
+	tempDir, err := os.MkdirTemp("", "darwin-photos-sync-*")
 	if err != nil {
 		return fmt.Errorf("failed to create temp dir: %w", err)
 	}

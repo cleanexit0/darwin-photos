@@ -7,8 +7,8 @@ import (
 
 	"github.com/dustin/go-humanize"
 	"github.com/spf13/cobra"
-	"github.com/sudopromptr/photoscli/internal/db"
-	"github.com/sudopromptr/photoscli/internal/models"
+	"github.com/cleanexit0/darwin-photos/internal/db"
+	"github.com/cleanexit0/darwin-photos/internal/models"
 )
 
 var (

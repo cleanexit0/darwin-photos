@@ -13,9 +13,9 @@ var (
 )
 
 var rootCmd = &cobra.Command{
-	Use:   "photoscli",
+	Use:   "darwin-photos",
 	Short: "CLI tool for exploring your iCloud Photos library",
-	Long: `photoscli reads your local iCloud Photos database to list photos,
+	Long: `darwin-photos reads your local iCloud Photos database to list photos,
 show detailed metadata, and download cloud-only photos.
 
 It works by reading the Photos.sqlite database directly, which means

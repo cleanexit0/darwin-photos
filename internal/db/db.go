@@ -28,7 +28,7 @@ func Open(libraryPath string) (*PhotosDB, error) {
 	}
 
 	// Create temp directory
-	tempDir, err := os.MkdirTemp("", "photoscli-*")
+	tempDir, err := os.MkdirTemp("", "darwin-photos-*")
 	if err != nil {
 		return nil, fmt.Errorf("create temp dir: %w", err)
 	}

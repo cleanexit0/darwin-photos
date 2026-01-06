@@ -1,4 +1,4 @@
-module github.com/sudopromptr/photoscli
+module github.com/cleanexit0/darwin-photos
 
 go 1.25.5
 

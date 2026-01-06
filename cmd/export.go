@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/sudopromptr/photoscli/internal/db"
-	"github.com/sudopromptr/photoscli/internal/icloud"
+	"github.com/cleanexit0/darwin-photos/internal/db"
+	"github.com/cleanexit0/darwin-photos/internal/icloud"
 )
 
 var (
@@ -35,28 +35,28 @@ Setup (import cookies from your browser):
   2. Open DevTools Network tab, find any request to p*-ckdatabasews.icloud.com{.cn}
   3. Note the partition number (e.g., p227)
   4. Use a cookie export extension to save cookies (Netscape format)
-  5. Run: photoscli export import-cookies cookies.txt https://p{N}-ckdatabasews.icloud.com{.cn}
+  5. Run: darwin-photos export import-cookies cookies.txt https://p{N}-ckdatabasews.icloud.com{.cn}
 
 Example:
-  photoscli export import-cookies cookies.txt https://p227-ckdatabasews.icloud.com.cn
+  darwin-photos export import-cookies cookies.txt https://p227-ckdatabasews.icloud.com.cn
 
 Commands:
-  photoscli export import-cookies <file> <photos-url>  # Import browser cookies
-  photoscli export logout                              # Clear saved session
+  darwin-photos export import-cookies <file> <photos-url>  # Import browser cookies
+  darwin-photos export logout                              # Clear saved session
 
 Single export:
-  photoscli export E448C88A /Volumes/Backup
+  darwin-photos export E448C88A /Volumes/Backup
 
 From file (one UUID per line):
-  photoscli export --file uuids.txt /Volumes/Backup
+  darwin-photos export --file uuids.txt /Volumes/Backup
 
 From stdin:
-  cat uuids.txt | photoscli export - /Volumes/Backup
+  cat uuids.txt | darwin-photos export - /Volumes/Backup
 
 Export all cloud-only photos:
-  photoscli export --all /Volumes/Backup
-  photoscli export --all --workers 4 /Volumes/Backup
-  photoscli export --all --limit 100 /Volumes/Backup`,
+  darwin-photos export --all /Volumes/Backup
+  darwin-photos export --all --workers 4 /Volumes/Backup
+  darwin-photos export --all --limit 100 /Volumes/Backup`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: runExport,
 }
@@ -77,7 +77,7 @@ func runExport(cmd *cobra.Command, args []string) error {
 			return runExportLogout()
 		case "import-cookies":
 			if len(args) < 3 {
-				return fmt.Errorf("import-cookies requires: <cookie-file> <photos-url>\nExample: photoscli export import-cookies cookies.txt https://p227-ckdatabasews.icloud.com.cn")
+				return fmt.Errorf("import-cookies requires: <cookie-file> <photos-url>\nExample: darwin-photos export import-cookies cookies.txt https://p227-ckdatabasews.icloud.com.cn")
 			}
 			return runImportCookies(args[1], args[2])
 		}
@@ -263,11 +263,11 @@ func getICloudClient() (*icloud.Client, error) {
 
 	sessionPath := icloud.DefaultSessionPath()
 	if err := client.LoadSession(sessionPath); err != nil {
-		return nil, fmt.Errorf("not logged in. Run 'photoscli export login' first")
+		return nil, fmt.Errorf("not logged in. Run 'darwin-photos export login' first")
 	}
 
 	if !client.IsLoggedIn() {
-		return nil, fmt.Errorf("session expired. Run 'photoscli export login' to re-authenticate")
+		return nil, fmt.Errorf("session expired. Run 'darwin-photos export login' to re-authenticate")
 	}
 
 	return client, nil

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sudopromptr/photoscli/internal/models"
+	"github.com/cleanexit0/darwin-photos/internal/models"
 )
 
 // Core Data epoch: January 1, 2001
