@@ -11,6 +11,7 @@ import (
 	"net/http/cookiejar"
 	"net/url"
 	"strings"
+	"time"
 )
 
 // ImportedCookie represents a cookie from a browser export.
@@ -37,6 +38,9 @@ type Client struct {
 
 	// Service URL (e.g., https://p227-ckdatabasews.icloud.com.cn)
 	PhotosURL string
+
+	// Stored imported cookies for setting on new domains dynamically
+	importedCookies []*ImportedCookie
 }
 
 // NewClient creates a new iCloud client.
@@ -47,17 +51,25 @@ func NewClient() (*Client, error) {
 	}
 
 	return &Client{
-		httpClient: &http.Client{Jar: jar},
-		cookieJar:  jar,
+		httpClient: &http.Client{
+			Jar:     jar,
+			Timeout: 30 * time.Second,
+		},
+		cookieJar: jar,
 	}, nil
 }
 
 // ImportCookies imports cookies from a browser export into the client.
 func (c *Client) ImportCookies(cookies []*ImportedCookie) {
-	// Base domains to set cookies on
+	// Store cookies for dynamic domain addition later
+	c.importedCookies = cookies
+
+	// Base domains to set cookies on (including setup endpoints)
 	domains := []string{
 		"https://www.icloud.com",
 		"https://www.icloud.com.cn",
+		"https://setup.icloud.com",
+		"https://setup.icloud.com.cn",
 	}
 
 	// Add PhotosURL domain if set
@@ -66,23 +78,28 @@ func (c *Client) ImportCookies(cookies []*ImportedCookie) {
 	}
 
 	for _, domain := range domains {
-		u, _ := url.Parse(domain)
-		var httpCookies []*http.Cookie
-		for _, ic := range cookies {
-			// Match cookies to domain (handle wildcard domains like .icloud.com.cn)
-			cookieDomain := strings.TrimPrefix(ic.Domain, ".")
-			if strings.HasSuffix(u.Host, cookieDomain) || u.Host == cookieDomain {
-				httpCookies = append(httpCookies, &http.Cookie{
-					Name:   ic.Name,
-					Value:  ic.Value,
-					Path:   ic.Path,
-					Secure: ic.Secure,
-				})
-			}
+		c.setCookiesForDomain(domain)
+	}
+}
+
+// setCookiesForDomain sets matching imported cookies on a specific domain.
+func (c *Client) setCookiesForDomain(domain string) {
+	u, _ := url.Parse(domain)
+	var httpCookies []*http.Cookie
+	for _, ic := range c.importedCookies {
+		// Match cookies to domain (handle wildcard domains like .icloud.com.cn)
+		cookieDomain := strings.TrimPrefix(ic.Domain, ".")
+		if strings.HasSuffix(u.Host, cookieDomain) || u.Host == cookieDomain {
+			httpCookies = append(httpCookies, &http.Cookie{
+				Name:   ic.Name,
+				Value:  ic.Value,
+				Path:   ic.Path,
+				Secure: ic.Secure,
+			})
 		}
-		if len(httpCookies) > 0 {
-			c.cookieJar.SetCookies(u, httpCookies)
-		}
+	}
+	if len(httpCookies) > 0 {
+		c.cookieJar.SetCookies(u, httpCookies)
 	}
 }
 
@@ -143,4 +160,100 @@ func (c *Client) doRequest(method, reqURL string, body interface{}) (*http.Respo
 	}
 
 	return c.httpClient.Do(req)
+}
+
+// DiscoverPhotosURL calls iCloud setup endpoint to discover the ckdatabasews URL.
+// Returns the discovered URL and any error.
+func (c *Client) DiscoverPhotosURL() (string, error) {
+	// Determine which setup endpoint to use based on cookies
+	// Try China endpoint first if we have .cn cookies
+	endpoints := []string{
+		"https://setup.icloud.com.cn/setup/ws/1",
+		"https://setup.icloud.com/setup/ws/1",
+	}
+
+	var lastErr error
+	for _, endpoint := range endpoints {
+		photosURL, err := c.tryDiscoverURL(endpoint, 0)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if photosURL != "" {
+			return photosURL, nil
+		}
+	}
+
+	if lastErr != nil {
+		return "", fmt.Errorf("failed to discover photos URL: %w", lastErr)
+	}
+	return "", fmt.Errorf("failed to discover photos URL from any endpoint")
+}
+
+func (c *Client) tryDiscoverURL(setupEndpoint string, depth int) (string, error) {
+	// Prevent infinite recursion
+	if depth > 3 {
+		return "", fmt.Errorf("too many redirects (depth %d)", depth)
+	}
+
+	// Build validate URL with required query parameters
+	validateURL := setupEndpoint + "/validate"
+	queryParams := url.Values{}
+	queryParams.Set("clientBuildNumber", "2546Build34")
+	queryParams.Set("clientMasteringNumber", "2546Build34")
+	queryParams.Set("clientId", c.getClientID())
+	queryParams.Set("requestId", generateUUID())
+	validateURL += "?" + queryParams.Encode()
+	resp, err := c.doRequest("POST", validateURL, nil)
+	if err != nil {
+		return "", fmt.Errorf("validate request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode == 421 {
+		// Need partition-specific server
+		partition := resp.Header.Get("X-Apple-User-Partition")
+		if partition != "" {
+			var partitionEndpoint string
+			var partitionDomain string
+			if strings.Contains(setupEndpoint, ".cn") {
+				partitionDomain = fmt.Sprintf("https://p%s-setup.icloud.com.cn", partition)
+				partitionEndpoint = partitionDomain + "/setup/ws/1"
+			} else {
+				partitionDomain = fmt.Sprintf("https://p%s-setup.icloud.com", partition)
+				partitionEndpoint = partitionDomain + "/setup/ws/1"
+			}
+			// Set cookies on the partition-specific domain before retrying
+			c.setCookiesForDomain(partitionDomain)
+			return c.tryDiscoverURL(partitionEndpoint, depth+1)
+		}
+	}
+
+	if resp.StatusCode >= 400 {
+		return "", fmt.Errorf("validate failed (status %d): %s", resp.StatusCode, string(body))
+	}
+
+	var result struct {
+		Webservices struct {
+			Ckdatabasews struct {
+				URL string `json:"url"`
+			} `json:"ckdatabasews"`
+		} `json:"webservices"`
+		DsInfo struct {
+			Dsid string `json:"dsid"`
+		} `json:"dsInfo"`
+	}
+
+	if err := json.Unmarshal(body, &result); err != nil {
+		return "", fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	// Update DSID if found
+	if result.DsInfo.Dsid != "" {
+		c.Dsid = result.DsInfo.Dsid
+	}
+
+	return result.Webservices.Ckdatabasews.URL, nil
 }

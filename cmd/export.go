@@ -10,9 +10,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/spf13/cobra"
 	"github.com/cleanexit0/darwin-photos/internal/db"
 	"github.com/cleanexit0/darwin-photos/internal/icloud"
+	"github.com/spf13/cobra"
 )
 
 var (
@@ -32,17 +32,12 @@ external storage without filling up local disk space.
 
 Setup (import cookies from your browser):
   1. Log into icloud.com or icloud.com.cn in Chrome
-  2. Open DevTools Network tab, find any request to p*-ckdatabasews.icloud.com{.cn}
-  3. Note the partition number (e.g., p227)
-  4. Use a cookie export extension to save cookies (Netscape format)
-  5. Run: darwin-photos export import-cookies cookies.txt https://p{N}-ckdatabasews.icloud.com{.cn}
-
-Example:
-  darwin-photos export import-cookies cookies.txt https://p227-ckdatabasews.icloud.com.cn
+  2. Use a cookie export extension to save cookies (Netscape format)
+  3. Run: darwin-photos export import-cookies cookies.txt
 
 Commands:
-  darwin-photos export import-cookies <file> <photos-url>  # Import browser cookies
-  darwin-photos export logout                              # Clear saved session
+  darwin-photos export import-cookies <cookie-file>  # Import browser cookies
+  darwin-photos export logout                        # Clear saved session
 
 Single export:
   darwin-photos export E448C88A /Volumes/Backup
@@ -76,10 +71,10 @@ func runExport(cmd *cobra.Command, args []string) error {
 		case "logout":
 			return runExportLogout()
 		case "import-cookies":
-			if len(args) < 3 {
-				return fmt.Errorf("import-cookies requires: <cookie-file> <photos-url>\nExample: darwin-photos export import-cookies cookies.txt https://p227-ckdatabasews.icloud.com.cn")
+			if len(args) < 2 {
+				return fmt.Errorf("import-cookies requires: <cookie-file>\nExample: darwin-photos export import-cookies cookies.txt")
 			}
-			return runImportCookies(args[1], args[2])
+			return runImportCookies(args[1])
 		}
 	}
 
@@ -134,7 +129,7 @@ func runExportLogout() error {
 	return nil
 }
 
-func runImportCookies(cookieFile, photosURL string) error {
+func runImportCookies(cookieFile string) error {
 	// Parse cookie file (Netscape/Mozilla format)
 	data, err := os.ReadFile(cookieFile)
 	if err != nil {
@@ -146,7 +141,6 @@ func runImportCookies(cookieFile, photosURL string) error {
 	// Parse ALL cookies from Netscape format
 	// Format: domain	flag	path	secure	expiration	name	value
 	var cookies []*icloud.ImportedCookie
-	var numericDsid string
 	var hasToken bool
 
 	for _, line := range strings.Split(content, "\n") {
@@ -179,16 +173,6 @@ func runImportCookies(cookieFile, photosURL string) error {
 			}
 			cookies = append(cookies, cookie)
 
-			// Extract numeric DSID from X-APPLE-WEBAUTH-USER (format: "t=...&d=12345" or just "d=12345")
-			if name == "X-APPLE-WEBAUTH-USER" {
-				for _, part := range strings.Split(value, "&") {
-					if strings.HasPrefix(part, "d=") {
-						numericDsid = strings.TrimPrefix(part, "d=")
-						break
-					}
-				}
-			}
-
 			// Check if we have the main auth token
 			if name == "X-APPLE-WEBAUTH-TOKEN" {
 				hasToken = true
@@ -210,16 +194,19 @@ func runImportCookies(cookieFile, photosURL string) error {
 		return err
 	}
 
-	// Set the Photos URL first (needed for cookie import to target correct domain)
-	client.PhotosURL = photosURL
-
-	// Import all cookies
+	// Import cookies first
 	client.ImportCookies(cookies)
 
-	// Set DSID if found
-	if numericDsid != "" {
-		client.Dsid = numericDsid
+	// Discover Photos URL from iCloud
+	fmt.Println("Discovering Photos URL from iCloud...")
+	photosURL, err := client.DiscoverPhotosURL()
+	if err != nil {
+		return fmt.Errorf("failed to discover Photos URL: %w", err)
 	}
+	if photosURL == "" {
+		return fmt.Errorf("no Photos URL found in response")
+	}
+	client.PhotosURL = photosURL
 
 	// Save session
 	sessionPath := icloud.DefaultSessionPath()
@@ -229,28 +216,6 @@ func runImportCookies(cookieFile, photosURL string) error {
 
 	fmt.Println("Cookies imported successfully!")
 	fmt.Printf("Session saved to: %s\n", sessionPath)
-	fmt.Printf("Photos URL: %s\n", photosURL)
-	fmt.Printf("Imported %d cookies\n", len(cookies))
-	if numericDsid != "" {
-		fmt.Printf("DSID: %s\n", numericDsid)
-	}
-
-	// List important cookies found
-	importantCookies := []string{
-		"X-APPLE-WEBAUTH-TOKEN",
-		"X-APPLE-WEBAUTH-USER",
-		"X-APPLE-WEBAUTH-PCS-Photos",
-		"X-APPLE-WEBAUTH-PCS-Cloudkit",
-		"X-APPLE-DS-WEB-SESSION-TOKEN",
-	}
-	for _, name := range importantCookies {
-		for _, c := range cookies {
-			if c.Name == name {
-				fmt.Printf("  Found: %s (len=%d)\n", name, len(c.Value))
-				break
-			}
-		}
-	}
 
 	return nil
 }
