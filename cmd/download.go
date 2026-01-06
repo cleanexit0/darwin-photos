@@ -9,29 +9,26 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/sudopromptr/photoscli/internal/db"
 	"github.com/sudopromptr/photoscli/internal/models"
-	"github.com/sudopromptr/photoscli/internal/photokit"
 )
-
-var useAppleScript bool
 
 var downloadCmd = &cobra.Command{
 	Use:   "download <uuid>",
-	Short: "Download a photo from iCloud to the library",
-	Long: `Download a cloud-only photo to its proper location in the Photos library.
+	Short: "Download a cloud photo to the Photos library",
+	Long: `Trigger iCloud download for a cloud-only photo.
 
-For cloud-only files, triggers iCloud download via PhotoKit (default) or Photos.app.
-The file will be available at its library path (e.g., originals/E/UUID.heic).
+The photo will be downloaded to its location in the Photos library,
+making it available for Photos.app to open locally. This syncs with iCloud.
+
+Use 'export' instead if you want to extract a copy without modifying the library.
 
 Examples:
-  photoscli download E448C88A
-  photoscli download E448C88A --applescript  # Force AppleScript method`,
+  photoscli download E448C88A`,
 	Args: cobra.ExactArgs(1),
 	RunE: runDownload,
 }
 
 func init() {
 	rootCmd.AddCommand(downloadCmd)
-	downloadCmd.Flags().BoolVar(&useAppleScript, "applescript", false, "Use AppleScript instead of PhotoKit (slower but more compatible)")
 }
 
 func runDownload(cmd *cobra.Command, args []string) error {
@@ -58,56 +55,14 @@ func runDownload(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// Cloud-only: trigger download
+	// Cloud-only: trigger download via AppleScript
 	fmt.Printf("Downloading from iCloud: %s\n", asset.OriginalFilename)
 
-	if useAppleScript {
-		if err := triggerDownloadToLibrary(asset.UUID); err != nil {
-			return err
-		}
-	} else {
-		if err := downloadViaPhotoKit(asset); err != nil {
-			// Fall back to AppleScript on PhotoKit failure
-			fmt.Printf("PhotoKit download failed (%v), falling back to AppleScript...\n", err)
-			if err := triggerDownloadToLibrary(asset.UUID); err != nil {
-				return err
-			}
-		}
-	}
-
-	fmt.Printf("Downloaded to library: %s\n", libraryPath)
-	return nil
-}
-
-func downloadViaPhotoKit(asset *models.Asset) error {
-	// Ensure we have Photos authorization
-	if err := photokit.EnsureAuthorized(); err != nil {
+	if err := triggerDownloadToLibrary(asset.UUID); err != nil {
 		return err
 	}
 
-	// Convert UUID to PhotoKit local identifier
-	localID := photokit.UUIDToLocalIdentifier(asset.UUID)
-
-	// Create temp file for download
-	tempDir, err := os.MkdirTemp("", "photoscli-download-*")
-	if err != nil {
-		return fmt.Errorf("failed to create temp dir: %w", err)
-	}
-	defer os.RemoveAll(tempDir)
-
-	tempPath := filepath.Join(tempDir, asset.Filename)
-
-	// Download using PhotoKit
-	if asset.Kind == models.AssetKindVideo {
-		if err := photokit.DownloadVideoAsset(localID, tempPath); err != nil {
-			return fmt.Errorf("PhotoKit video download failed: %w", err)
-		}
-	} else {
-		if err := photokit.DownloadAsset(localID, tempPath); err != nil {
-			return fmt.Errorf("PhotoKit download failed: %w", err)
-		}
-	}
-
+	fmt.Printf("Downloaded to library: %s\n", libraryPath)
 	return nil
 }
 
