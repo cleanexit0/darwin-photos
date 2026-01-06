@@ -179,11 +179,13 @@ func runImportCookies(cookieFile, photosURL string) error {
 			}
 			cookies = append(cookies, cookie)
 
-			// Extract numeric DSID from X-APPLE-WEBAUTH-USER
-			if name == "X-APPLE-WEBAUTH-USER" && strings.Contains(value, "d=") {
-				dsidParts := strings.Split(value, "d=")
-				if len(dsidParts) > 1 {
-					numericDsid = strings.TrimSpace(dsidParts[1])
+			// Extract numeric DSID from X-APPLE-WEBAUTH-USER (format: "t=...&d=12345" or just "d=12345")
+			if name == "X-APPLE-WEBAUTH-USER" {
+				for _, part := range strings.Split(value, "&") {
+					if strings.HasPrefix(part, "d=") {
+						numericDsid = strings.TrimPrefix(part, "d=")
+						break
+					}
 				}
 			}
 

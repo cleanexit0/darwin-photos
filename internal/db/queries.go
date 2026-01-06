@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/sudopromptr/photoscli/internal/models"
@@ -478,18 +479,42 @@ LIMIT 1
 	return guid.String, nil
 }
 
-// GetCloudMasterGUIDs returns CloudKit GUIDs for multiple asset UUIDs
+// GetCloudMasterGUIDs returns CloudKit GUIDs for multiple asset UUIDs in a single query
 func GetCloudMasterGUIDs(db *sql.DB, uuids []string) (map[string]string, error) {
+	if len(uuids) == 0 {
+		return make(map[string]string), nil
+	}
+
+	// Build placeholders for IN clause
+	placeholders := make([]string, len(uuids))
+	args := make([]interface{}, len(uuids))
+	for i, uuid := range uuids {
+		placeholders[i] = "?"
+		args[i] = uuid
+	}
+
+	query := fmt.Sprintf(`
+SELECT a.ZUUID, cm.ZCLOUDMASTERGUID
+FROM ZASSET a
+JOIN ZCLOUDMASTER cm ON a.ZMASTER = cm.Z_PK
+WHERE a.ZUUID IN (%s) AND cm.ZCLOUDMASTERGUID IS NOT NULL AND cm.ZCLOUDMASTERGUID != ''
+`, strings.Join(placeholders, ","))
+
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
 	result := make(map[string]string)
-	for _, uuid := range uuids {
-		guid, err := GetCloudMasterGUID(db, uuid)
-		if err != nil {
-			// Skip assets without CloudKit GUIDs
-			continue
+	for rows.Next() {
+		var uuid, guid string
+		if err := rows.Scan(&uuid, &guid); err != nil {
+			return nil, err
 		}
 		result[uuid] = guid
 	}
-	return result, nil
+	return result, rows.Err()
 }
 
 // GetStats returns library statistics
