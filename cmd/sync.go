@@ -17,65 +17,65 @@ import (
 )
 
 var (
-	downloadAll   bool
-	downloadWorkers int
-	downloadLimit   int
-	downloadFile    string
+	syncAll     bool
+	syncWorkers int
+	syncLimit   int
+	syncFile    string
 )
 
-var downloadCmd = &cobra.Command{
-	Use:   "download [uuid] | --file <path> | - | --all",
-	Short: "Download cloud photos to the Photos library",
-	Long: `Download cloud-only photos from iCloud to the Photos library.
+var syncCmd = &cobra.Command{
+	Use:   "sync [uuid] | --file <path> | - | --all",
+	Short: "Sync cloud photos to the Photos library",
+	Long: `Sync cloud-only photos from iCloud to the local Photos library.
 
-Uses PhotoKit to trigger iCloud download. The photos are stored in the
+Uses PhotoKit to trigger iCloud sync. The photos are stored in the
 Photos library, making them available locally.
 
-Single download:
-  photoscli download E448C88A
+Single sync:
+  photoscli sync E448C88A
 
 From file (one UUID per line):
-  photoscli download --file uuids.txt
+  photoscli sync --file uuids.txt
 
 From stdin:
-  cat uuids.txt | photoscli download -
-  photoscli download - < uuids.txt
+  cat uuids.txt | photoscli sync -
+  photoscli sync - < uuids.txt
 
-Download all cloud-only photos:
-  photoscli download --all
-  photoscli download --all --workers 4
-  photoscli download --all --limit 100`,
+Sync all cloud-only photos:
+  photoscli sync --all
+  photoscli sync --all --workers 4
+  photoscli sync --all --limit 100`,
 	Args: cobra.MaximumNArgs(1),
-	RunE: runDownload,
+	RunE: runSync,
 }
 
 func init() {
-	rootCmd.AddCommand(downloadCmd)
-	downloadCmd.Flags().BoolVar(&downloadAll, "all", false, "Download all cloud-only photos")
-	downloadCmd.Flags().StringVarP(&downloadFile, "file", "f", "", "File containing UUIDs (one per line)")
-	downloadCmd.Flags().IntVarP(&downloadWorkers, "workers", "w", 4, "Number of parallel workers")
-	downloadCmd.Flags().IntVarP(&downloadLimit, "limit", "n", 0, "Limit number of photos to download (0 = unlimited)")
+	rootCmd.AddCommand(syncCmd)
+	syncCmd.Flags().BoolVar(&syncAll, "all", false, "Sync all cloud-only photos")
+	syncCmd.Flags().StringVarP(&syncFile, "file", "f", "", "File containing UUIDs (one per line)")
+	syncCmd.Flags().IntVarP(&syncWorkers, "workers", "w", 4, "Number of parallel workers")
+	syncCmd.Flags().IntVarP(&syncLimit, "limit", "n", 0, "Limit number of photos to sync (0 = unlimited)")
 }
 
-func runDownload(cmd *cobra.Command, args []string) error {
-	// Batch mode: all cloud-only photos
-	if downloadAll {
-		if len(args) != 0 || downloadFile != "" {
+func runSync(cmd *cobra.Command, args []string) error {
+	// All mode: all cloud-only photos
+	if syncAll {
+		if len(args) != 0 || syncFile != "" {
 			return fmt.Errorf("--all cannot be combined with UUID or --file")
 		}
-		return runBatchDownload()
+		return runSyncAll()
 	}
 
 	// File input mode
-	if downloadFile != "" {
+	if syncFile != "" {
 		if len(args) != 0 {
 			return fmt.Errorf("--file cannot be combined with UUID argument")
 		}
-		uuids, err := readUUIDsFromFile(downloadFile)
+		uuids, err := readUUIDsFromFile(syncFile)
 		if err != nil {
 			return err
 		}
-		return runListDownload(uuids)
+		return runSyncList(uuids)
 	}
 
 	// Stdin mode
@@ -84,17 +84,17 @@ func runDownload(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return err
 		}
-		return runListDownload(uuids)
+		return runSyncList(uuids)
 	}
 
 	// Single UUID mode
 	if len(args) != 1 {
-		return fmt.Errorf("requires a UUID, --file, or --batch")
+		return fmt.Errorf("requires a UUID, --file, or --all")
 	}
-	return runListDownload([]string{args[0]})
+	return runSyncList([]string{args[0]})
 }
 
-func runBatchDownload() error {
+func runSyncAll() error {
 	// Ensure Photos authorization
 	if err := photokit.EnsureAuthorized(); err != nil {
 		return err
@@ -110,7 +110,7 @@ func runBatchDownload() error {
 	// Get cloud-only assets
 	opts := db.ListOptions{
 		CloudOnly: true,
-		Limit:     downloadLimit,
+		Limit:     syncLimit,
 	}
 	assets, total, err := db.ListAssets(photosDB.DB(), opts)
 	if err != nil {
@@ -118,25 +118,25 @@ func runBatchDownload() error {
 	}
 
 	if len(assets) == 0 {
-		fmt.Println("No cloud-only photos to download")
+		fmt.Println("No cloud-only photos to sync")
 		return nil
 	}
 
-	if downloadLimit > 0 && downloadLimit < total {
-		fmt.Printf("Downloading %d of %d cloud-only photos (limited)\n", len(assets), total)
+	if syncLimit > 0 && syncLimit < total {
+		fmt.Printf("Syncing %d of %d cloud-only photos (limited)\n", len(assets), total)
 	} else {
-		fmt.Printf("Downloading %d cloud-only photos\n", len(assets))
+		fmt.Printf("Syncing %d cloud-only photos\n", len(assets))
 	}
 
-	return downloadAssets(assets)
+	return syncAssets(assets)
 }
 
-type downloadResult struct {
+type syncResult struct {
 	filename string
 	err      error
 }
 
-func downloadWorker(jobs <-chan *models.Asset, results chan<- downloadResult, wg *sync.WaitGroup) {
+func syncWorker(jobs <-chan *models.Asset, results chan<- syncResult, wg *sync.WaitGroup) {
 	defer wg.Done()
 
 	for asset := range jobs {
@@ -145,19 +145,18 @@ func downloadWorker(jobs <-chan *models.Asset, results chan<- downloadResult, wg
 			filename = asset.Filename
 		}
 
-		// Download
-		if err := downloadViaPhotoKit(asset); err != nil {
-			results <- downloadResult{filename: filename, err: err}
+		if err := syncViaPhotoKit(asset); err != nil {
+			results <- syncResult{filename: filename, err: err}
 			continue
 		}
 
-		results <- downloadResult{filename: filename}
+		results <- syncResult{filename: filename}
 	}
 }
 
-func downloadViaPhotoKit(asset *models.Asset) error {
-	// Create temp directory for the download
-	tempDir, err := os.MkdirTemp("", "photoscli-download-*")
+func syncViaPhotoKit(asset *models.Asset) error {
+	// Create temp directory for the sync
+	tempDir, err := os.MkdirTemp("", "photoscli-sync-*")
 	if err != nil {
 		return fmt.Errorf("failed to create temp dir: %w", err)
 	}
@@ -172,14 +171,14 @@ func downloadViaPhotoKit(asset *models.Asset) error {
 	// Convert UUID to PhotoKit local identifier
 	localID := photokit.UUIDToLocalIdentifier(asset.UUID)
 
-	// Download using PhotoKit (triggers iCloud download)
+	// Sync using PhotoKit (triggers iCloud download)
 	if asset.Kind == models.AssetKindVideo {
 		if err := photokit.DownloadVideoAsset(localID, outputPath); err != nil {
-			return fmt.Errorf("download failed: %w", err)
+			return fmt.Errorf("sync failed: %w", err)
 		}
 	} else {
 		if err := photokit.DownloadAsset(localID, outputPath); err != nil {
-			return fmt.Errorf("download failed: %w", err)
+			return fmt.Errorf("sync failed: %w", err)
 		}
 	}
 
@@ -218,7 +217,7 @@ func parseUUIDs(scanner *bufio.Scanner) ([]string, error) {
 	return uuids, nil
 }
 
-func runListDownload(identifiers []string) error {
+func runSyncList(identifiers []string) error {
 	// Ensure Photos authorization
 	if err := photokit.EnsureAuthorized(); err != nil {
 		return err
@@ -255,28 +254,28 @@ func runListDownload(identifiers []string) error {
 	}
 
 	if len(assets) == 0 {
-		fmt.Println("No cloud-only photos to download")
+		fmt.Println("No cloud-only photos to sync")
 		return nil
 	}
 
-	fmt.Printf("Downloading %d photos\n", len(assets))
+	fmt.Printf("Syncing %d photos\n", len(assets))
 
-	return downloadAssets(assets)
+	return syncAssets(assets)
 }
 
-func downloadAssets(assets []*models.Asset) error {
+func syncAssets(assets []*models.Asset) error {
 	count := len(assets)
-	fmt.Printf("Using %d workers\n\n", downloadWorkers)
+	fmt.Printf("Using %d workers\n\n", syncWorkers)
 
 	// Create worker pool
 	jobs := make(chan *models.Asset, count)
-	results := make(chan downloadResult, count)
+	results := make(chan syncResult, count)
 
 	// Start workers
 	var wg sync.WaitGroup
-	for w := 0; w < downloadWorkers; w++ {
+	for w := 0; w < syncWorkers; w++ {
 		wg.Add(1)
-		go downloadWorker(jobs, results, &wg)
+		go syncWorker(jobs, results, &wg)
 	}
 
 	// Send jobs
@@ -315,7 +314,7 @@ func downloadAssets(assets []*models.Asset) error {
 	}
 
 	if failed > 0 {
-		return fmt.Errorf("%d downloads failed", failed)
+		return fmt.Errorf("%d syncs failed", failed)
 	}
 	return nil
 }
