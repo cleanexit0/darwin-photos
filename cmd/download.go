@@ -1,9 +1,11 @@
 package cmd
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -18,10 +20,11 @@ var (
 	downloadBatch   bool
 	downloadWorkers int
 	downloadLimit   int
+	downloadFile    string
 )
 
 var downloadCmd = &cobra.Command{
-	Use:   "download <uuid|--batch>",
+	Use:   "download [uuid] | --file <path> | - | --batch",
 	Short: "Download cloud photos to the Photos library",
 	Long: `Download cloud-only photos from iCloud to the Photos library.
 
@@ -30,6 +33,13 @@ Photos library, making them available locally.
 
 Single download:
   photoscli download E448C88A
+
+From file (one UUID per line):
+  photoscli download --file uuids.txt
+
+From stdin:
+  cat uuids.txt | photoscli download -
+  photoscli download - < uuids.txt
 
 Batch download (all cloud-only photos):
   photoscli download --batch
@@ -42,57 +52,46 @@ Batch download (all cloud-only photos):
 func init() {
 	rootCmd.AddCommand(downloadCmd)
 	downloadCmd.Flags().BoolVar(&downloadBatch, "batch", false, "Download all cloud-only photos")
-	downloadCmd.Flags().IntVarP(&downloadWorkers, "workers", "w", 4, "Number of parallel workers for batch download")
+	downloadCmd.Flags().StringVarP(&downloadFile, "file", "f", "", "File containing UUIDs (one per line)")
+	downloadCmd.Flags().IntVarP(&downloadWorkers, "workers", "w", 4, "Number of parallel workers")
 	downloadCmd.Flags().IntVarP(&downloadLimit, "limit", "n", 0, "Limit number of photos to download (0 = unlimited)")
 }
 
 func runDownload(cmd *cobra.Command, args []string) error {
+	// Batch mode: all cloud-only photos
 	if downloadBatch {
-		if len(args) != 0 {
-			return fmt.Errorf("batch mode does not accept a UUID argument")
+		if len(args) != 0 || downloadFile != "" {
+			return fmt.Errorf("--batch cannot be combined with UUID or --file")
 		}
 		return runBatchDownload()
 	}
 
+	// File input mode
+	if downloadFile != "" {
+		if len(args) != 0 {
+			return fmt.Errorf("--file cannot be combined with UUID argument")
+		}
+		uuids, err := readUUIDsFromFile(downloadFile)
+		if err != nil {
+			return err
+		}
+		return runListDownload(uuids)
+	}
+
+	// Stdin mode
+	if len(args) == 1 && args[0] == "-" {
+		uuids, err := readUUIDsFromStdin()
+		if err != nil {
+			return err
+		}
+		return runListDownload(uuids)
+	}
+
+	// Single UUID mode
 	if len(args) != 1 {
-		return fmt.Errorf("single download requires a UUID argument")
+		return fmt.Errorf("requires a UUID, --file, or --batch")
 	}
-	return runSingleDownload(args[0])
-}
-
-func runSingleDownload(identifier string) error {
-	// Ensure Photos authorization
-	if err := photokit.EnsureAuthorized(); err != nil {
-		return err
-	}
-
-	// Open database
-	photosDB, err := db.Open(getLibraryPath())
-	if err != nil {
-		return fmt.Errorf("failed to open Photos database: %w", err)
-	}
-	defer photosDB.Close()
-
-	// Find asset
-	asset, err := db.GetAssetByUUID(photosDB.DB(), identifier)
-	if err != nil {
-		return fmt.Errorf("asset not found: %s", identifier)
-	}
-
-	if asset.IsLocallyAvailable() {
-		fmt.Printf("Already available locally: %s\n", asset.OriginalFilename)
-		return nil
-	}
-
-	// Download
-	fmt.Printf("Downloading from iCloud: %s\n", asset.OriginalFilename)
-
-	if err := downloadViaPhotoKit(asset); err != nil {
-		return err
-	}
-
-	fmt.Printf("Downloaded: %s\n", asset.OriginalFilename)
-	return nil
+	return runListDownload([]string{args[0]})
 }
 
 func runBatchDownload() error {
@@ -123,64 +122,13 @@ func runBatchDownload() error {
 		return nil
 	}
 
-	count := len(assets)
 	if downloadLimit > 0 && downloadLimit < total {
-		fmt.Printf("Downloading %d of %d cloud-only photos (limited)\n", count, total)
+		fmt.Printf("Downloading %d of %d cloud-only photos (limited)\n", len(assets), total)
 	} else {
-		fmt.Printf("Downloading %d cloud-only photos\n", count)
-	}
-	fmt.Printf("Using %d workers\n\n", downloadWorkers)
-
-	// Create worker pool
-	jobs := make(chan *models.Asset, count)
-	results := make(chan downloadResult, count)
-
-	// Start workers
-	var wg sync.WaitGroup
-	for w := 0; w < downloadWorkers; w++ {
-		wg.Add(1)
-		go downloadWorker(jobs, results, &wg)
+		fmt.Printf("Downloading %d cloud-only photos\n", len(assets))
 	}
 
-	// Send jobs
-	for _, asset := range assets {
-		jobs <- asset
-	}
-	close(jobs)
-
-	// Collect results in background
-	go func() {
-		wg.Wait()
-		close(results)
-	}()
-
-	// Track progress
-	var completed, succeeded, failed int64
-	startTime := time.Now()
-
-	for result := range results {
-		completed++
-		if result.err != nil {
-			atomic.AddInt64(&failed, 1)
-			fmt.Printf("[%d/%d] FAILED: %s - %v\n", completed, count, result.filename, result.err)
-		} else {
-			atomic.AddInt64(&succeeded, 1)
-			fmt.Printf("[%d/%d] OK: %s\n", completed, count, result.filename)
-		}
-	}
-
-	// Summary
-	elapsed := time.Since(startTime)
-	fmt.Printf("\nCompleted in %s\n", elapsed.Round(time.Millisecond))
-	fmt.Printf("  Succeeded: %d\n", succeeded)
-	if failed > 0 {
-		fmt.Printf("  Failed:    %d\n", failed)
-	}
-
-	if failed > 0 {
-		return fmt.Errorf("%d downloads failed", failed)
-	}
-	return nil
+	return downloadAssets(assets)
 }
 
 type downloadResult struct {
@@ -235,5 +183,139 @@ func downloadViaPhotoKit(asset *models.Asset) error {
 		}
 	}
 
+	return nil
+}
+
+func readUUIDsFromFile(path string) ([]string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open file: %w", err)
+	}
+	defer file.Close()
+
+	return parseUUIDs(bufio.NewScanner(file))
+}
+
+func readUUIDsFromStdin() ([]string, error) {
+	return parseUUIDs(bufio.NewScanner(os.Stdin))
+}
+
+func parseUUIDs(scanner *bufio.Scanner) ([]string, error) {
+	var uuids []string
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		uuids = append(uuids, line)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("failed to read input: %w", err)
+	}
+	if len(uuids) == 0 {
+		return nil, fmt.Errorf("no UUIDs found in input")
+	}
+	return uuids, nil
+}
+
+func runListDownload(identifiers []string) error {
+	// Ensure Photos authorization
+	if err := photokit.EnsureAuthorized(); err != nil {
+		return err
+	}
+
+	// Open database
+	photosDB, err := db.Open(getLibraryPath())
+	if err != nil {
+		return fmt.Errorf("failed to open Photos database: %w", err)
+	}
+	defer photosDB.Close()
+
+	// Look up assets
+	var assets []*models.Asset
+	var notFound []string
+	for _, id := range identifiers {
+		asset, err := db.GetAssetByUUID(photosDB.DB(), id)
+		if err != nil {
+			notFound = append(notFound, id)
+			continue
+		}
+		if !asset.IsLocallyAvailable() {
+			assets = append(assets, asset)
+		}
+	}
+
+	if len(notFound) > 0 {
+		fmt.Printf("Warning: %d UUIDs not found\n", len(notFound))
+	}
+
+	skippedLocal := len(identifiers) - len(notFound) - len(assets)
+	if skippedLocal > 0 {
+		fmt.Printf("Skipping %d already local photos\n", skippedLocal)
+	}
+
+	if len(assets) == 0 {
+		fmt.Println("No cloud-only photos to download")
+		return nil
+	}
+
+	fmt.Printf("Downloading %d photos\n", len(assets))
+
+	return downloadAssets(assets)
+}
+
+func downloadAssets(assets []*models.Asset) error {
+	count := len(assets)
+	fmt.Printf("Using %d workers\n\n", downloadWorkers)
+
+	// Create worker pool
+	jobs := make(chan *models.Asset, count)
+	results := make(chan downloadResult, count)
+
+	// Start workers
+	var wg sync.WaitGroup
+	for w := 0; w < downloadWorkers; w++ {
+		wg.Add(1)
+		go downloadWorker(jobs, results, &wg)
+	}
+
+	// Send jobs
+	for _, asset := range assets {
+		jobs <- asset
+	}
+	close(jobs)
+
+	// Collect results in background
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	// Track progress
+	var completed, succeeded, failed int64
+	startTime := time.Now()
+
+	for result := range results {
+		completed++
+		if result.err != nil {
+			atomic.AddInt64(&failed, 1)
+			fmt.Printf("[%d/%d] FAILED: %s - %v\n", completed, count, result.filename, result.err)
+		} else {
+			atomic.AddInt64(&succeeded, 1)
+			fmt.Printf("[%d/%d] OK: %s\n", completed, count, result.filename)
+		}
+	}
+
+	// Summary
+	elapsed := time.Since(startTime)
+	fmt.Printf("\nCompleted in %s\n", elapsed.Round(time.Millisecond))
+	fmt.Printf("  Succeeded: %d\n", succeeded)
+	if failed > 0 {
+		fmt.Printf("  Failed:    %d\n", failed)
+	}
+
+	if failed > 0 {
+		return fmt.Errorf("%d downloads failed", failed)
+	}
 	return nil
 }
