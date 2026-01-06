@@ -3,36 +3,68 @@ package cmd
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/sudopromptr/photoscli/internal/db"
 	"github.com/sudopromptr/photoscli/internal/models"
+	"github.com/sudopromptr/photoscli/internal/photokit"
+)
+
+var (
+	downloadBatch   bool
+	downloadWorkers int
+	downloadLimit   int
 )
 
 var downloadCmd = &cobra.Command{
-	Use:   "download <uuid>",
-	Short: "Download a cloud photo to the Photos library",
-	Long: `Trigger iCloud download for a cloud-only photo.
+	Use:   "download <uuid|--batch>",
+	Short: "Download cloud photos to the Photos library",
+	Long: `Download cloud-only photos from iCloud to the Photos library.
 
-The photo will be downloaded to its location in the Photos library,
-making it available for Photos.app to open locally. This syncs with iCloud.
+Uses PhotoKit to trigger iCloud download. The photos are stored in the
+Photos library, making them available locally.
 
-Use 'export' instead if you want to extract a copy without modifying the library.
+Single download:
+  photoscli download E448C88A
 
-Examples:
-  photoscli download E448C88A`,
-	Args: cobra.ExactArgs(1),
+Batch download (all cloud-only photos):
+  photoscli download --batch
+  photoscli download --batch --workers 4
+  photoscli download --batch --limit 100`,
+	Args: cobra.MaximumNArgs(1),
 	RunE: runDownload,
 }
 
 func init() {
 	rootCmd.AddCommand(downloadCmd)
+	downloadCmd.Flags().BoolVar(&downloadBatch, "batch", false, "Download all cloud-only photos")
+	downloadCmd.Flags().IntVarP(&downloadWorkers, "workers", "w", 4, "Number of parallel workers for batch download")
+	downloadCmd.Flags().IntVarP(&downloadLimit, "limit", "n", 0, "Limit number of photos to download (0 = unlimited)")
 }
 
 func runDownload(cmd *cobra.Command, args []string) error {
-	identifier := args[0]
+	if downloadBatch {
+		if len(args) != 0 {
+			return fmt.Errorf("batch mode does not accept a UUID argument")
+		}
+		return runBatchDownload()
+	}
+
+	if len(args) != 1 {
+		return fmt.Errorf("single download requires a UUID argument")
+	}
+	return runSingleDownload(args[0])
+}
+
+func runSingleDownload(identifier string) error {
+	// Ensure Photos authorization
+	if err := photokit.EnsureAuthorized(); err != nil {
+		return err
+	}
 
 	// Open database
 	photosDB, err := db.Open(getLibraryPath())
@@ -47,65 +79,160 @@ func runDownload(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("asset not found: %s", identifier)
 	}
 
-	// Build library path
-	libraryPath := buildLibraryPath(asset)
-
 	if asset.IsLocallyAvailable() {
-		fmt.Printf("Already downloaded: %s\n", libraryPath)
+		fmt.Printf("Already available locally: %s\n", asset.OriginalFilename)
 		return nil
 	}
 
-	// Cloud-only: trigger download via AppleScript
+	// Download
 	fmt.Printf("Downloading from iCloud: %s\n", asset.OriginalFilename)
 
-	if err := triggerDownloadToLibrary(asset.UUID); err != nil {
+	if err := downloadViaPhotoKit(asset); err != nil {
 		return err
 	}
 
-	fmt.Printf("Downloaded to library: %s\n", libraryPath)
+	fmt.Printf("Downloaded: %s\n", asset.OriginalFilename)
 	return nil
 }
 
-func buildLibraryPath(asset *models.Asset) string {
-	dir := asset.Directory
-	if dir == "" && len(asset.UUID) > 0 {
-		dir = string(asset.UUID[0])
+func runBatchDownload() error {
+	// Ensure Photos authorization
+	if err := photokit.EnsureAuthorized(); err != nil {
+		return err
 	}
-	return filepath.Join(getLibraryPath(), "originals", dir, asset.Filename)
+
+	// Open database
+	photosDB, err := db.Open(getLibraryPath())
+	if err != nil {
+		return fmt.Errorf("failed to open Photos database: %w", err)
+	}
+	defer photosDB.Close()
+
+	// Get cloud-only assets
+	opts := db.ListOptions{
+		CloudOnly: true,
+		Limit:     downloadLimit,
+	}
+	assets, total, err := db.ListAssets(photosDB.DB(), opts)
+	if err != nil {
+		return fmt.Errorf("failed to list assets: %w", err)
+	}
+
+	if len(assets) == 0 {
+		fmt.Println("No cloud-only photos to download")
+		return nil
+	}
+
+	count := len(assets)
+	if downloadLimit > 0 && downloadLimit < total {
+		fmt.Printf("Downloading %d of %d cloud-only photos (limited)\n", count, total)
+	} else {
+		fmt.Printf("Downloading %d cloud-only photos\n", count)
+	}
+	fmt.Printf("Using %d workers\n\n", downloadWorkers)
+
+	// Create worker pool
+	jobs := make(chan *models.Asset, count)
+	results := make(chan downloadResult, count)
+
+	// Start workers
+	var wg sync.WaitGroup
+	for w := 0; w < downloadWorkers; w++ {
+		wg.Add(1)
+		go downloadWorker(jobs, results, &wg)
+	}
+
+	// Send jobs
+	for _, asset := range assets {
+		jobs <- asset
+	}
+	close(jobs)
+
+	// Collect results in background
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	// Track progress
+	var completed, succeeded, failed int64
+	startTime := time.Now()
+
+	for result := range results {
+		completed++
+		if result.err != nil {
+			atomic.AddInt64(&failed, 1)
+			fmt.Printf("[%d/%d] FAILED: %s - %v\n", completed, count, result.filename, result.err)
+		} else {
+			atomic.AddInt64(&succeeded, 1)
+			fmt.Printf("[%d/%d] OK: %s\n", completed, count, result.filename)
+		}
+	}
+
+	// Summary
+	elapsed := time.Since(startTime)
+	fmt.Printf("\nCompleted in %s\n", elapsed.Round(time.Millisecond))
+	fmt.Printf("  Succeeded: %d\n", succeeded)
+	if failed > 0 {
+		fmt.Printf("  Failed:    %d\n", failed)
+	}
+
+	if failed > 0 {
+		return fmt.Errorf("%d downloads failed", failed)
+	}
+	return nil
 }
 
-func triggerDownloadToLibrary(uuid string) error {
-	// Export to temp directory to trigger iCloud download, then delete the export
+type downloadResult struct {
+	filename string
+	err      error
+}
+
+func downloadWorker(jobs <-chan *models.Asset, results chan<- downloadResult, wg *sync.WaitGroup) {
+	defer wg.Done()
+
+	for asset := range jobs {
+		filename := asset.OriginalFilename
+		if filename == "" {
+			filename = asset.Filename
+		}
+
+		// Download
+		if err := downloadViaPhotoKit(asset); err != nil {
+			results <- downloadResult{filename: filename, err: err}
+			continue
+		}
+
+		results <- downloadResult{filename: filename}
+	}
+}
+
+func downloadViaPhotoKit(asset *models.Asset) error {
+	// Create temp directory for the download
 	tempDir, err := os.MkdirTemp("", "photoscli-download-*")
 	if err != nil {
 		return fmt.Errorf("failed to create temp dir: %w", err)
 	}
 	defer os.RemoveAll(tempDir)
 
-	return triggerDownloadViaExport(uuid, tempDir)
-}
-
-func triggerDownloadViaExport(uuid string, outputDir string) error {
-	// Convert to absolute path for AppleScript
-	absOutput, err := filepath.Abs(outputDir)
-	if err != nil {
-		return fmt.Errorf("failed to get absolute path: %w", err)
+	filename := asset.OriginalFilename
+	if filename == "" {
+		filename = asset.Filename
 	}
+	outputPath := filepath.Join(tempDir, filename)
 
-	// AppleScript to export photo via Photos.app
-	// This triggers iCloud download for cloud-only photos
-	script := fmt.Sprintf(`
-tell application "Photos"
-	set mediaItem to media item id "%s"
-	set outputFolder to POSIX file "%s"
-	export {mediaItem} to outputFolder
-end tell
-`, uuid, absOutput)
+	// Convert UUID to PhotoKit local identifier
+	localID := photokit.UUIDToLocalIdentifier(asset.UUID)
 
-	cmd := exec.Command("osascript", "-e", script)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("AppleScript export failed: %s: %w", string(output), err)
+	// Download using PhotoKit (triggers iCloud download)
+	if asset.Kind == models.AssetKindVideo {
+		if err := photokit.DownloadVideoAsset(localID, outputPath); err != nil {
+			return fmt.Errorf("download failed: %w", err)
+		}
+	} else {
+		if err := photokit.DownloadAsset(localID, outputPath); err != nil {
+			return fmt.Errorf("download failed: %w", err)
+		}
 	}
 
 	return nil
