@@ -1,0 +1,134 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release-darwin-amd64:
+    runs-on: macos-13
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        run: |
+          go build -ldflags "-s -w -X main.version=${{ github.ref_name }} -X main.commit=${{ github.sha }} -X main.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" -o darwin-photos ./main.go
+          tar -czvf darwin-photos_${{ github.ref_name }}_darwin_amd64.tar.gz darwin-photos
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: darwin-amd64
+          path: darwin-photos_${{ github.ref_name }}_darwin_amd64.tar.gz
+
+  release-darwin-arm64:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        run: |
+          go build -ldflags "-s -w -X main.version=${{ github.ref_name }} -X main.commit=${{ github.sha }} -X main.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" -o darwin-photos ./main.go
+          tar -czvf darwin-photos_${{ github.ref_name }}_darwin_arm64.tar.gz darwin-photos
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: darwin-arm64
+          path: darwin-photos_${{ github.ref_name }}_darwin_arm64.tar.gz
+
+  publish:
+    needs: [release-darwin-amd64, release-darwin-arm64]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum *.tar.gz > checksums.txt
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          # Get previous tag
+          PREV_TAG=$(git describe --tags --abbrev=0 ${{ github.ref_name }}^ 2>/dev/null || echo "")
+          if [ -z "$PREV_TAG" ]; then
+            echo "body<<EOF" >> $GITHUB_OUTPUT
+            git log --oneline --no-decorate ${{ github.ref_name }} >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          else
+            echo "body<<EOF" >> $GITHUB_OUTPUT
+            git log --oneline --no-decorate ${PREV_TAG}..${{ github.ref_name }} >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body: |
+            ## Changelog
+            ${{ steps.changelog.outputs.body }}
+
+            ## Install via Homebrew
+            ```
+            brew install cleanexit0/tap/darwin-photos
+            ```
+          files: |
+            dist/*.tar.gz
+            dist/checksums.txt
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+
+  update-homebrew:
+    needs: publish
+    runs-on: ubuntu-latest
+    if: ${{ !contains(github.ref_name, '-') }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Get checksums
+        id: checksums
+        run: |
+          AMD64_SHA=$(sha256sum dist/darwin-photos_${{ github.ref_name }}_darwin_amd64.tar.gz | cut -d ' ' -f 1)
+          ARM64_SHA=$(sha256sum dist/darwin-photos_${{ github.ref_name }}_darwin_arm64.tar.gz | cut -d ' ' -f 1)
+          echo "amd64=$AMD64_SHA" >> $GITHUB_OUTPUT
+          echo "arm64=$ARM64_SHA" >> $GITHUB_OUTPUT
+
+      - name: Update Homebrew formula
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          repository: cleanexit0/homebrew-tap
+          event-type: update-formula
+          client-payload: |
+            {
+              "formula": "darwin-photos",
+              "version": "${{ github.ref_name }}",
+              "amd64_sha256": "${{ steps.checksums.outputs.amd64 }}",
+              "arm64_sha256": "${{ steps.checksums.outputs.arm64 }}"
+            }
