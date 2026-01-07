@@ -308,6 +308,7 @@ type exportJob struct {
 type exportResult struct {
 	uuid     string
 	filename string
+	skipped  bool
 	err      error
 }
 
@@ -377,7 +378,7 @@ func exportPhotos(client *icloud.Client, uuids []string, outputDir string) error
 		close(results)
 	}()
 
-	var completed, succeeded, failed int64
+	var completed, succeeded, failed, skipped int64
 	var failedUUIDs []string
 	startTime := time.Now()
 
@@ -387,6 +388,9 @@ func exportPhotos(client *icloud.Client, uuids []string, outputDir string) error
 			atomic.AddInt64(&failed, 1)
 			failedUUIDs = append(failedUUIDs, result.uuid)
 			fmt.Printf("[%d/%d] FAILED: %s - %v\n", completed, count, result.uuid, result.err)
+		} else if result.skipped {
+			atomic.AddInt64(&skipped, 1)
+			fmt.Printf("[%d/%d] SKIPPED: %s (already exists)\n", completed, count, result.filename)
 		} else {
 			atomic.AddInt64(&succeeded, 1)
 			fmt.Printf("[%d/%d] OK: %s\n", completed, count, result.filename)
@@ -396,6 +400,9 @@ func exportPhotos(client *icloud.Client, uuids []string, outputDir string) error
 	elapsed := time.Since(startTime)
 	fmt.Printf("\nCompleted in %s\n", elapsed.Round(time.Millisecond))
 	fmt.Printf("  Succeeded: %d\n", succeeded)
+	if skipped > 0 {
+		fmt.Printf("  Skipped:   %d (already exist in output directory)\n", skipped)
+	}
 	if failed > 0 {
 		fmt.Printf("  Failed:    %d\n", failed)
 
@@ -465,9 +472,9 @@ func exportWorker(client *icloud.Client, config *exportConfig, jobs <-chan expor
 
 		outputPath := filepath.Join(config.outputDir, filename)
 
-		// Check if file exists
+		// Check if file exists - skip if already present
 		if _, err := os.Stat(outputPath); err == nil {
-			results <- exportResult{uuid: job.uuid, filename: filename, err: fmt.Errorf("file already exists")}
+			results <- exportResult{uuid: job.uuid, filename: filename, skipped: true}
 			continue
 		}
 
