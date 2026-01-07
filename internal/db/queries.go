@@ -294,10 +294,10 @@ SELECT
      ORDER BY r.ZDATALENGTH DESC LIMIT 1) as data_length
 FROM ZASSET a
 LEFT JOIN ZADDITIONALASSETATTRIBUTES aa ON a.ZADDITIONALATTRIBUTES = aa.Z_PK
-WHERE a.ZUUID = ? OR a.ZUUID LIKE ?
+WHERE a.ZUUID = ?
 LIMIT 1
 `
-	row := db.QueryRow(query, uuid, uuid+"%")
+	row := db.QueryRow(query, uuid)
 
 	a := &models.Asset{}
 	var (
@@ -483,51 +483,26 @@ WHERE (rel.Z_3ASSETS = ? OR rel.Z_26ASSETS = ? OR rel.Z_27ASSETS = ? OR rel.Z_28
 	return albums, nil
 }
 
-// GetCloudMasterGUID returns the CloudKit GUID for an asset UUID
-// This is needed because Photos.sqlite UUID != CloudKit recordName
-func GetCloudMasterGUID(db *sql.DB, uuid string) (string, error) {
-	query := `
-SELECT cm.ZCLOUDMASTERGUID
-FROM ZASSET a
-JOIN ZCLOUDMASTER cm ON a.ZMASTER = cm.Z_PK
-WHERE a.ZUUID = ? OR a.ZUUID LIKE ?
-LIMIT 1
-`
-	var guid sql.NullString
-	err := db.QueryRow(query, uuid, uuid+"%").Scan(&guid)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return "", fmt.Errorf("no CloudKit GUID found for UUID: %s", uuid)
-		}
-		return "", err
-	}
-	if !guid.Valid || guid.String == "" {
-		return "", fmt.Errorf("CloudKit GUID is empty for UUID: %s", uuid)
-	}
-	return guid.String, nil
-}
-
 // GetCloudMasterGUIDs returns CloudKit GUIDs for multiple asset UUIDs in a single query
-// Supports both full UUIDs and short prefixes (e.g., "E395FF92" matches "E395FF92-6C1F-46FD-...")
 func GetCloudMasterGUIDs(db *sql.DB, uuids []string) (map[string]string, error) {
 	if len(uuids) == 0 {
 		return make(map[string]string), nil
 	}
 
-	// Build OR conditions for each UUID (support both exact and prefix match)
-	conditions := make([]string, len(uuids))
-	args := make([]interface{}, 0, len(uuids)*2)
+	// Build placeholders for IN clause
+	placeholders := make([]string, len(uuids))
+	args := make([]interface{}, len(uuids))
 	for i, uuid := range uuids {
-		conditions[i] = "(a.ZUUID = ? OR a.ZUUID LIKE ?)"
-		args = append(args, uuid, uuid+"%")
+		placeholders[i] = "?"
+		args[i] = uuid
 	}
 
 	query := fmt.Sprintf(`
 SELECT a.ZUUID, cm.ZCLOUDMASTERGUID
 FROM ZASSET a
 JOIN ZCLOUDMASTER cm ON a.ZMASTER = cm.Z_PK
-WHERE (%s) AND cm.ZCLOUDMASTERGUID IS NOT NULL AND cm.ZCLOUDMASTERGUID != ''
-`, strings.Join(conditions, " OR "))
+WHERE a.ZUUID IN (%s) AND cm.ZCLOUDMASTERGUID IS NOT NULL AND cm.ZCLOUDMASTERGUID != ''
+`, strings.Join(placeholders, ", "))
 
 	rows, err := db.Query(query, args...)
 	if err != nil {
@@ -535,20 +510,13 @@ WHERE (%s) AND cm.ZCLOUDMASTERGUID IS NOT NULL AND cm.ZCLOUDMASTERGUID != ''
 	}
 	defer rows.Close()
 
-	// Map full UUIDs back to the input (possibly short) UUIDs
 	result := make(map[string]string)
 	for rows.Next() {
-		var fullUUID, guid string
-		if err := rows.Scan(&fullUUID, &guid); err != nil {
+		var uuid, guid string
+		if err := rows.Scan(&uuid, &guid); err != nil {
 			return nil, err
 		}
-		// Find which input UUID this matches
-		for _, inputUUID := range uuids {
-			if fullUUID == inputUUID || strings.HasPrefix(fullUUID, inputUUID) {
-				result[inputUUID] = guid
-				break
-			}
-		}
+		result[uuid] = guid
 	}
 	return result, rows.Err()
 }
@@ -560,12 +528,12 @@ func GetAssetSizes(db *sql.DB, uuids []string) (map[string]int64, int64, error) 
 		return make(map[string]int64), 0, nil
 	}
 
-	// Build OR conditions for each UUID (support both exact and prefix match)
-	conditions := make([]string, len(uuids))
-	args := make([]interface{}, 0, len(uuids)*2)
+	// Build placeholders for IN clause
+	placeholders := make([]string, len(uuids))
+	args := make([]interface{}, len(uuids))
 	for i, uuid := range uuids {
-		conditions[i] = "(a.ZUUID = ? OR a.ZUUID LIKE ?)"
-		args = append(args, uuid, uuid+"%")
+		placeholders[i] = "?"
+		args[i] = uuid
 	}
 
 	query := fmt.Sprintf(`
@@ -579,8 +547,8 @@ SELECT a.ZUUID,
        ) as file_size
 FROM ZASSET a
 LEFT JOIN ZADDITIONALASSETATTRIBUTES aa ON a.ZADDITIONALATTRIBUTES = aa.Z_PK
-WHERE %s
-`, strings.Join(conditions, " OR "))
+WHERE a.ZUUID IN (%s)
+`, strings.Join(placeholders, ", "))
 
 	rows, err := db.Query(query, args...)
 	if err != nil {
@@ -591,40 +559,13 @@ WHERE %s
 	result := make(map[string]int64)
 	var totalBytes int64
 	for rows.Next() {
-		var fullUUID string
+		var uuid string
 		var fileSize int64
-		if err := rows.Scan(&fullUUID, &fileSize); err != nil {
+		if err := rows.Scan(&uuid, &fileSize); err != nil {
 			return nil, 0, err
 		}
-		// Find which input UUID this matches
-		for _, inputUUID := range uuids {
-			if fullUUID == inputUUID || strings.HasPrefix(fullUUID, inputUUID) {
-				result[inputUUID] = fileSize
-				totalBytes += fileSize
-				break
-			}
-		}
+		result[uuid] = fileSize
+		totalBytes += fileSize
 	}
 	return result, totalBytes, rows.Err()
-}
-
-// GetStats returns library statistics
-func GetStats(db *sql.DB) (total, local, cloud int, err error) {
-	err = db.QueryRow(`
-SELECT COUNT(*) FROM ZASSET WHERE ZTRASHEDSTATE = 0 OR ZTRASHEDSTATE IS NULL
-`).Scan(&total)
-	if err != nil {
-		return
-	}
-
-	db.QueryRow(`
-SELECT COUNT(*) FROM ZASSET a
-WHERE (a.ZTRASHEDSTATE = 0 OR a.ZTRASHEDSTATE IS NULL)
-  AND (SELECT r.ZLOCALAVAILABILITY FROM ZINTERNALRESOURCE r
-       WHERE r.ZASSET = a.Z_PK AND r.ZRESOURCETYPE = 0
-       ORDER BY r.ZDATALENGTH DESC LIMIT 1) = 1
-`).Scan(&local)
-
-	cloud = total - local
-	return
 }
