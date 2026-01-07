@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"strings"
 
 	"github.com/dustin/go-humanize"
 	"github.com/spf13/cobra"
@@ -142,83 +143,81 @@ func outputJSON(asset *models.Asset, ext *models.ExtendedAttributes, albums []*m
 }
 
 func outputFormatted(asset *models.Asset, ext *models.ExtendedAttributes, albums []*models.Album) error {
-	fmt.Println("=== Photo Details ===")
-	fmt.Println()
-
-	fmt.Printf("UUID:               %s\n", asset.UUID)
-	if asset.OriginalFilename != "" {
-		fmt.Printf("Original Filename:  %s\n", asset.OriginalFilename)
+	fmt.Printf("uuid:      %s\n", asset.UUID)
+	fmt.Printf("file:      %s\n", asset.OriginalFilename)
+	if asset.Filename != asset.OriginalFilename {
+		fmt.Printf("current:   %s\n", asset.Filename)
 	}
-	fmt.Printf("Current Filename:   %s\n", asset.Filename)
-	fmt.Printf("Type:               %s (%s)\n", asset.TypeString(), asset.UniformTypeID)
-	fmt.Printf("Dimensions:         %d x %d\n", asset.Width, asset.Height)
-	fmt.Printf("File Size:          %s (%d bytes)\n", humanize.Bytes(uint64(asset.FileSize)), asset.FileSize)
+	fmt.Printf("type:      %s (%s)\n", asset.TypeString(), asset.UniformTypeID)
+	fmt.Printf("size:      %s (%d)\n", humanize.Bytes(uint64(asset.FileSize)), asset.FileSize)
+	if asset.Width > 0 && asset.Height > 0 {
+		fmt.Printf("dims:      %dx%d\n", asset.Width, asset.Height)
+	}
 	if !asset.DateCreated.IsZero() {
-		fmt.Printf("Date Created:       %s\n", asset.DateCreated.Format("2006-01-02 15:04:05"))
-	}
-	if !asset.DateModified.IsZero() {
-		fmt.Printf("Date Modified:      %s\n", asset.DateModified.Format("2006-01-02 15:04:05"))
+		fmt.Printf("date:      %s\n", asset.DateCreated.Format("2006-01-02 15:04:05"))
 	}
 	if asset.Duration > 0 {
-		fmt.Printf("Duration:           %.1f seconds\n", asset.Duration)
+		fmt.Printf("duration:  %.1fs\n", asset.Duration)
 	}
-	fmt.Printf("Favorite:           %s\n", boolToYesNo(asset.Favorite))
-	fmt.Printf("Hidden:             %s\n", boolToYesNo(asset.Hidden))
-	fmt.Printf("Trashed:            %s\n", boolToYesNo(asset.Trashed))
+	fmt.Printf("status:    %s\n", asset.StatusString())
+	fmt.Printf("path:      %s\n", buildLocalPath(asset))
 
 	if asset.Latitude != 0 || asset.Longitude != 0 {
-		fmt.Println()
-		fmt.Println("=== Location ===")
-		fmt.Printf("Latitude:           %.6f\n", asset.Latitude)
-		fmt.Printf("Longitude:          %.6f\n", asset.Longitude)
+		fmt.Printf("location:  %.6f,%.6f\n", asset.Latitude, asset.Longitude)
 	}
 
-	if ext != nil && (ext.CameraMake != "" || ext.CameraModel != "") {
-		fmt.Println()
-		fmt.Println("=== Camera Info ===")
-		if ext.CameraMake != "" {
-			fmt.Printf("Make:               %s\n", ext.CameraMake)
-		}
-		if ext.CameraModel != "" {
-			fmt.Printf("Model:              %s\n", ext.CameraModel)
+	if ext != nil {
+		if ext.CameraMake != "" || ext.CameraModel != "" {
+			camera := ext.CameraMake
+			if ext.CameraModel != "" {
+				if camera != "" {
+					camera += " "
+				}
+				camera += ext.CameraModel
+			}
+			fmt.Printf("camera:    %s\n", camera)
 		}
 		if ext.LensModel != "" {
-			fmt.Printf("Lens:               %s\n", ext.LensModel)
+			fmt.Printf("lens:      %s\n", ext.LensModel)
 		}
 		if ext.ISO > 0 {
-			fmt.Printf("ISO:                %d\n", ext.ISO)
+			fmt.Printf("iso:       %d\n", ext.ISO)
 		}
 		if ext.Aperture > 0 {
-			fmt.Printf("Aperture:           f/%.1f\n", ext.Aperture)
+			fmt.Printf("aperture:  f/%.1f\n", ext.Aperture)
 		}
 		if ext.ShutterSpeed > 0 {
 			if ext.ShutterSpeed < 1 {
-				fmt.Printf("Shutter Speed:      1/%.0f\n", 1/ext.ShutterSpeed)
+				fmt.Printf("shutter:   1/%.0f\n", 1/ext.ShutterSpeed)
 			} else {
-				fmt.Printf("Shutter Speed:      %.1fs\n", ext.ShutterSpeed)
+				fmt.Printf("shutter:   %.1fs\n", ext.ShutterSpeed)
 			}
 		}
 		if ext.FocalLength > 0 {
-			fmt.Printf("Focal Length:       %.1fmm\n", ext.FocalLength)
+			fmt.Printf("focal:     %.1fmm\n", ext.FocalLength)
 		}
-	}
-
-	fmt.Println()
-	fmt.Println("=== Storage Status ===")
-	fmt.Printf("Local Availability: %s\n", asset.StatusString())
-	localPath := buildLocalPath(asset)
-	if asset.IsLocallyAvailable() {
-		fmt.Printf("Local Path:         %s\n", localPath)
-	} else {
-		fmt.Printf("Expected Path:      %s (not downloaded)\n", localPath)
 	}
 
 	if len(albums) > 0 {
-		fmt.Println()
-		fmt.Println("=== Albums ===")
-		for _, alb := range albums {
-			fmt.Printf("- %s\n", alb.Title)
+		names := make([]string, len(albums))
+		for i, alb := range albums {
+			names[i] = alb.Title
 		}
+		fmt.Printf("albums:    %s\n", strings.Join(names, ", "))
+	}
+
+	var flags []string
+	if asset.Favorite {
+		flags = append(flags, "favorite")
+	}
+	if asset.Hidden {
+		flags = append(flags, "hidden")
+	}
+	if asset.Trashed {
+		flags = append(flags, "trashed")
+	}
+	if len(flags) > 0 {
+		fmt.Printf("flags:     %s\n", strings.Join(flags, ", "))
 	}
 
 	return nil
@@ -231,11 +230,4 @@ func buildLocalPath(asset *models.Asset) string {
 		dir = string(asset.UUID[0])
 	}
 	return filepath.Join(libraryPath, "originals", dir, asset.Filename)
-}
-
-func boolToYesNo(b bool) string {
-	if b {
-		return "Yes"
-	}
-	return "No"
 }
