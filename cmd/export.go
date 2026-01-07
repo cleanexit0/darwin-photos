@@ -20,6 +20,7 @@ var (
 	exportWorkers int
 	exportLimit   int
 	exportFile    string
+	exportRetry   int
 )
 
 var exportCmd = &cobra.Command{
@@ -62,6 +63,7 @@ func init() {
 	exportCmd.Flags().StringVarP(&exportFile, "file", "f", "", "File containing UUIDs (one per line)")
 	exportCmd.Flags().IntVarP(&exportWorkers, "workers", "w", 4, "Number of parallel workers")
 	exportCmd.Flags().IntVarP(&exportLimit, "limit", "n", 0, "Limit number of photos to export (0 = unlimited)")
+	exportCmd.Flags().IntVarP(&exportRetry, "retry", "r", 3, "Number of retry attempts for failed downloads")
 }
 
 func runExport(cmd *cobra.Command, args []string) error {
@@ -309,6 +311,11 @@ type exportResult struct {
 	err      error
 }
 
+type exportConfig struct {
+	maxRetries int
+	outputDir  string
+}
+
 func exportPhotos(client *icloud.Client, uuids []string, outputDir string) error {
 	// Open Photos database to look up CloudKit GUIDs
 	photosDB, err := db.Open(getLibraryPath())
@@ -340,7 +347,16 @@ func exportPhotos(client *icloud.Client, uuids []string, outputDir string) error
 
 	count := len(validJobs)
 	fmt.Printf("Found %d photos with CloudKit GUIDs\n", count)
-	fmt.Printf("Using %d workers\n\n", exportWorkers)
+	fmt.Printf("Using %d workers\n", exportWorkers)
+	if exportRetry > 0 {
+		fmt.Printf("Retries: %d per photo\n", exportRetry)
+	}
+	fmt.Println()
+
+	config := &exportConfig{
+		maxRetries: exportRetry,
+		outputDir:  outputDir,
+	}
 
 	jobs := make(chan exportJob, count)
 	results := make(chan exportResult, count)
@@ -348,7 +364,7 @@ func exportPhotos(client *icloud.Client, uuids []string, outputDir string) error
 	var wg sync.WaitGroup
 	for w := 0; w < exportWorkers; w++ {
 		wg.Add(1)
-		go exportWorker(client, outputDir, jobs, results, &wg)
+		go exportWorker(client, config, jobs, results, &wg)
 	}
 
 	for _, job := range validJobs {
@@ -362,12 +378,14 @@ func exportPhotos(client *icloud.Client, uuids []string, outputDir string) error
 	}()
 
 	var completed, succeeded, failed int64
+	var failedUUIDs []string
 	startTime := time.Now()
 
 	for result := range results {
 		completed++
 		if result.err != nil {
 			atomic.AddInt64(&failed, 1)
+			failedUUIDs = append(failedUUIDs, result.uuid)
 			fmt.Printf("[%d/%d] FAILED: %s - %v\n", completed, count, result.uuid, result.err)
 		} else {
 			atomic.AddInt64(&succeeded, 1)
@@ -380,6 +398,15 @@ func exportPhotos(client *icloud.Client, uuids []string, outputDir string) error
 	fmt.Printf("  Succeeded: %d\n", succeeded)
 	if failed > 0 {
 		fmt.Printf("  Failed:    %d\n", failed)
+
+		// Write failed UUIDs to ~/.darwin-photos/ with timestamp
+		failedFile, err := writeFailedUUIDs(failedUUIDs)
+		if err != nil {
+			fmt.Printf("  Warning: could not write failed UUIDs to file: %v\n", err)
+		} else {
+			fmt.Printf("\nFailed UUIDs written to: %s\n", failedFile)
+			fmt.Printf("Retry with: darwin-photos export --file %s %s\n", failedFile, outputDir)
+		}
 	}
 
 	if failed > 0 {
@@ -388,14 +415,44 @@ func exportPhotos(client *icloud.Client, uuids []string, outputDir string) error
 	return nil
 }
 
-func exportWorker(client *icloud.Client, outputDir string, jobs <-chan exportJob, results chan<- exportResult, wg *sync.WaitGroup) {
+func writeFailedUUIDs(uuids []string) (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("failed to get home directory: %w", err)
+	}
+
+	dir := filepath.Join(home, ".darwin-photos")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return "", fmt.Errorf("failed to create directory: %w", err)
+	}
+
+	// Use timestamp for unique filename: failed_exports_20060102_150405.txt
+	timestamp := time.Now().Format("20060102_150405")
+	filename := fmt.Sprintf("failed_exports_%s.txt", timestamp)
+	path := filepath.Join(dir, filename)
+
+	file, err := os.Create(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+
+	for _, uuid := range uuids {
+		if _, err := fmt.Fprintln(file, uuid); err != nil {
+			return "", err
+		}
+	}
+	return path, nil
+}
+
+func exportWorker(client *icloud.Client, config *exportConfig, jobs <-chan exportJob, results chan<- exportResult, wg *sync.WaitGroup) {
 	defer wg.Done()
 
 	for job := range jobs {
 		// Get download URL from iCloud using CloudKit GUID
 		asset, err := client.GetDownloadURL(job.cloudKitGUID)
 		if err != nil {
-			results <- exportResult{uuid: job.uuid, err: err}
+			results <- exportResult{uuid: job.uuid, err: fmt.Errorf("failed to get download URL: %w", err)}
 			continue
 		}
 
@@ -406,7 +463,7 @@ func exportWorker(client *icloud.Client, outputDir string, jobs <-chan exportJob
 		}
 		filename := job.uuid + ext
 
-		outputPath := filepath.Join(outputDir, filename)
+		outputPath := filepath.Join(config.outputDir, filename)
 
 		// Check if file exists
 		if _, err := os.Stat(outputPath); err == nil {
@@ -414,8 +471,8 @@ func exportWorker(client *icloud.Client, outputDir string, jobs <-chan exportJob
 			continue
 		}
 
-		// Download
-		if err := client.DownloadPhoto(asset.DownloadURL, outputPath); err != nil {
+		// Download with retry
+		if err := client.DownloadPhotoWithRetry(asset.DownloadURL, outputPath, config.maxRetries); err != nil {
 			results <- exportResult{uuid: job.uuid, err: err}
 			continue
 		}
