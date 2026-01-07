@@ -294,6 +294,14 @@ func runExportAll(outputDir string) error {
 		return nil
 	}
 
+	// Build UUID-to-size map and calculate total size
+	sizeMap := make(map[string]int64)
+	var totalBytes int64
+	for _, asset := range assets {
+		sizeMap[asset.UUID] = asset.FileSize
+		totalBytes += asset.FileSize
+	}
+
 	// Extract UUIDs
 	uuids := make([]string, len(assets))
 	for i, asset := range assets {
@@ -301,12 +309,12 @@ func runExportAll(outputDir string) error {
 	}
 
 	if exportLimit > 0 && exportLimit < total {
-		fmt.Printf("Exporting %d of %d cloud-only photos (limited)\n", len(uuids), total)
+		fmt.Printf("Exporting %d of %d cloud-only photos (%s)\n", len(uuids), total, formatBytes(totalBytes))
 	} else {
-		fmt.Printf("Exporting %d cloud-only photos\n", len(uuids))
+		fmt.Printf("Exporting %d cloud-only photos (%s)\n", len(uuids), formatBytes(totalBytes))
 	}
 
-	return exportPhotos(client, uuids, outputDir)
+	return exportPhotos(client, uuids, sizeMap, outputDir)
 }
 
 func runExportList(uuids []string, outputDir string) error {
@@ -319,20 +327,34 @@ func runExportList(uuids []string, outputDir string) error {
 		return err
 	}
 
-	fmt.Printf("Exporting %d photos\n", len(uuids))
-	return exportPhotos(client, uuids, outputDir)
+	// Look up file sizes from database
+	photosDB, err := db.Open(getLibraryPath())
+	if err != nil {
+		return fmt.Errorf("failed to open Photos database: %w", err)
+	}
+	defer photosDB.Close()
+
+	sizeMap, totalBytes, err := db.GetAssetSizes(photosDB.DB(), uuids)
+	if err != nil {
+		return fmt.Errorf("failed to look up file sizes: %w", err)
+	}
+
+	fmt.Printf("Exporting %d photos (%s)\n", len(uuids), formatBytes(totalBytes))
+	return exportPhotos(client, uuids, sizeMap, outputDir)
 }
 
 type exportJob struct {
 	uuid         string
 	cloudKitGUID string
+	fileSize     int64
 }
 
 type exportResult struct {
-	uuid     string
-	filename string
-	skipped  bool
-	err      error
+	uuid          string
+	filename      string
+	skipped       bool
+	downloadBytes int64
+	err           error
 }
 
 type exportConfig struct {
@@ -340,7 +362,7 @@ type exportConfig struct {
 	outputDir  string
 }
 
-func exportPhotos(client *icloud.Client, uuids []string, outputDir string) error {
+func exportPhotos(client *icloud.Client, uuids []string, sizeMap map[string]int64, outputDir string) error {
 	// Open Photos database to look up CloudKit GUIDs
 	photosDB, err := db.Open(getLibraryPath())
 	if err != nil {
@@ -356,9 +378,12 @@ func exportPhotos(client *icloud.Client, uuids []string, outputDir string) error
 
 	// Filter to only UUIDs that have CloudKit GUIDs
 	var validJobs []exportJob
+	var validTotalBytes int64
 	for _, uuid := range uuids {
 		if guid, ok := guidMap[uuid]; ok {
-			validJobs = append(validJobs, exportJob{uuid: uuid, cloudKitGUID: guid})
+			fileSize := sizeMap[uuid]
+			validJobs = append(validJobs, exportJob{uuid: uuid, cloudKitGUID: guid, fileSize: fileSize})
+			validTotalBytes += fileSize
 		} else {
 			fmt.Printf("Warning: No CloudKit GUID found for %s (may be local-only)\n", uuid)
 		}
@@ -395,21 +420,24 @@ func exportPhotos(client *icloud.Client, uuids []string, outputDir string) error
 	}()
 
 	var succeeded, failed, skipped int64
+	var downloadedBytes int64
 	var failedUUIDs []string
 	var failedItems []string
 	startTime := time.Now()
-	bar := NewProgressBar(count)
+	bar := NewSizeProgressBar(count, validTotalBytes)
 
 	for result := range results {
-		bar.Add(1)
+		bar.AddBytes(1, result.downloadBytes)
 		if result.err != nil {
 			atomic.AddInt64(&failed, 1)
 			failedUUIDs = append(failedUUIDs, result.uuid)
 			failedItems = append(failedItems, fmt.Sprintf("%s: %v", result.uuid, result.err))
 		} else if result.skipped {
 			atomic.AddInt64(&skipped, 1)
+			downloadedBytes += result.downloadBytes // Count skipped file sizes too
 		} else {
 			atomic.AddInt64(&succeeded, 1)
+			downloadedBytes += result.downloadBytes
 		}
 	}
 	bar.Finish()
@@ -494,7 +522,7 @@ func exportWorker(client *icloud.Client, config *exportConfig, jobs <-chan expor
 
 		// Check if file exists - skip if already present
 		if _, err := os.Stat(outputPath); err == nil {
-			results <- exportResult{uuid: job.uuid, filename: filename, skipped: true}
+			results <- exportResult{uuid: job.uuid, filename: filename, skipped: true, downloadBytes: job.fileSize}
 			continue
 		}
 
@@ -504,7 +532,7 @@ func exportWorker(client *icloud.Client, config *exportConfig, jobs <-chan expor
 			continue
 		}
 
-		results <- exportResult{uuid: job.uuid, filename: filename}
+		results <- exportResult{uuid: job.uuid, filename: filename, downloadBytes: job.fileSize}
 	}
 }
 

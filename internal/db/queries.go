@@ -39,15 +39,15 @@ func parseTimestamp(v interface{}) time.Time {
 
 // ListOptions configures the list query
 type ListOptions struct {
-	Limit           int
-	Offset          int
-	LocalOnly       bool
-	CloudOnly       bool
-	PhotosOnly      bool
-	VideosOnly      bool
-	IncludeTrashed  bool
-	SortBy          string // "date", "name", "size"
-	SortDescending  bool
+	Limit          int
+	Offset         int
+	LocalOnly      bool
+	CloudOnly      bool
+	PhotosOnly     bool
+	VideosOnly     bool
+	IncludeTrashed bool
+	SortBy         string // "date", "name", "size"
+	SortDescending bool
 }
 
 // ListAssets returns a list of assets based on the options
@@ -525,6 +525,61 @@ WHERE (%s) AND cm.ZCLOUDMASTERGUID IS NOT NULL AND cm.ZCLOUDMASTERGUID != ''
 	return result, rows.Err()
 }
 
+// GetAssetSizes returns file sizes for multiple asset UUIDs
+// Returns a map of UUID -> fileSize and total bytes
+func GetAssetSizes(db *sql.DB, uuids []string) (map[string]int64, int64, error) {
+	if len(uuids) == 0 {
+		return make(map[string]int64), 0, nil
+	}
+
+	// Build OR conditions for each UUID (support both exact and prefix match)
+	conditions := make([]string, len(uuids))
+	args := make([]interface{}, 0, len(uuids)*2)
+	for i, uuid := range uuids {
+		conditions[i] = "(a.ZUUID = ? OR a.ZUUID LIKE ?)"
+		args = append(args, uuid, uuid+"%")
+	}
+
+	query := fmt.Sprintf(`
+SELECT a.ZUUID,
+       COALESCE(
+           (SELECT r.ZDATALENGTH FROM ZINTERNALRESOURCE r
+            WHERE r.ZASSET = a.Z_PK AND r.ZRESOURCETYPE = 0
+            ORDER BY r.ZDATALENGTH DESC LIMIT 1),
+           aa.ZORIGINALFILESIZE,
+           0
+       ) as file_size
+FROM ZASSET a
+LEFT JOIN ZADDITIONALASSETATTRIBUTES aa ON a.ZADDITIONALATTRIBUTES = aa.Z_PK
+WHERE %s
+`, strings.Join(conditions, " OR "))
+
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	result := make(map[string]int64)
+	var totalBytes int64
+	for rows.Next() {
+		var fullUUID string
+		var fileSize int64
+		if err := rows.Scan(&fullUUID, &fileSize); err != nil {
+			return nil, 0, err
+		}
+		// Find which input UUID this matches
+		for _, inputUUID := range uuids {
+			if fullUUID == inputUUID || strings.HasPrefix(fullUUID, inputUUID) {
+				result[inputUUID] = fileSize
+				totalBytes += fileSize
+				break
+			}
+		}
+	}
+	return result, totalBytes, rows.Err()
+}
+
 // GetStats returns library statistics
 func GetStats(db *sql.DB) (total, local, cloud int, err error) {
 	err = db.QueryRow(`
@@ -545,3 +600,5 @@ WHERE (a.ZTRASHEDSTATE = 0 OR a.ZTRASHEDSTATE IS NULL)
 	cloud = total - local
 	return
 }
+
+// TODO: avoid ZUUID LIKE if possible
