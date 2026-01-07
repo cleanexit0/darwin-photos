@@ -24,7 +24,7 @@ var (
 )
 
 var exportCmd = &cobra.Command{
-	Use:   "export [uuid] | --from-file <path> | - | --all <output-dir>",
+	Use:   "export [uuid] <output-dir>",
 	Short: "Export photos directly from iCloud to a directory",
 	Long: `Export photos directly from iCloud to a directory, bypassing local Photos library.
 
@@ -40,10 +40,6 @@ Setup (import cookies from your browser):
      - Safari: "ExportCookies" from github.com/nickvdyck/ExportCookies
   4. Export cookies for "icloud.com" domain (Netscape/Cookies.txt format)
   5. Run: darwin-photos export import-cookies cookies.txt
-
-Commands:
-  darwin-photos export import-cookies <cookie-file>  # Import browser cookies
-  darwin-photos export logout                        # Clear saved session
 
 Single export:
   darwin-photos export E448C88A /Volumes/Backup
@@ -61,12 +57,44 @@ Export all cloud-only photos:
 
 Note: Use 'export' to download directly to any directory (e.g., external drive).
 Use 'sync' to download into your Photos library (uses local disk, no cookies needed).`,
-	Args: cobra.MinimumNArgs(1),
 	RunE: runExport,
+}
+
+var importCookiesCmd = &cobra.Command{
+	Use:   "import-cookies <cookie-file>",
+	Short: "Import browser cookies for iCloud authentication",
+	Long: `Import cookies exported from your browser to authenticate with iCloud.
+
+Steps:
+  1. Log into icloud.com (or icloud.com.cn for China) in your browser
+  2. Navigate to Photos to ensure photo cookies are loaded
+  3. Export cookies using a browser extension:
+     - Chrome: "Get cookies.txt LOCALLY" extension
+     - Firefox: "cookies.txt" extension
+     - Safari: "ExportCookies" from github.com/nickvdyck/ExportCookies
+  4. Export cookies for "icloud.com" domain (Netscape/Cookies.txt format)
+  5. Run: darwin-photos export import-cookies cookies.txt`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runImportCookies(args[0])
+	},
+}
+
+var logoutCmd = &cobra.Command{
+	Use:   "logout",
+	Short: "Clear saved iCloud session",
+	Long:  `Clear the saved iCloud session and cookies. You will need to import cookies again before exporting.`,
+	Args:  cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runExportLogout()
+	},
 }
 
 func init() {
 	rootCmd.AddCommand(exportCmd)
+	exportCmd.AddCommand(importCookiesCmd)
+	exportCmd.AddCommand(logoutCmd)
+
 	exportCmd.Flags().BoolVar(&exportAll, "all", false, "Export all cloud-only photos")
 	exportCmd.Flags().StringVarP(&exportFile, "from-file", "f", "", "File containing UUIDs (one per line)")
 	exportCmd.Flags().IntVarP(&exportWorkers, "workers", "w", 4, "Number of parallel workers")
@@ -75,20 +103,6 @@ func init() {
 }
 
 func runExport(cmd *cobra.Command, args []string) error {
-	// Handle subcommands
-	if len(args) >= 1 {
-		switch args[0] {
-		case "logout":
-			return runExportLogout()
-		case "import-cookies":
-			if len(args) < 2 {
-				return fmt.Errorf("import-cookies requires: <cookie-file>\nExample: darwin-photos export import-cookies cookies.txt")
-			}
-			return runImportCookies(args[1])
-		}
-	}
-
-	// All other modes need an output directory
 	var outputDir string
 	var uuids []string
 
