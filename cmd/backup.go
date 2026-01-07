@@ -158,7 +158,9 @@ func runBackup(cmd *cobra.Command, args []string) error {
 	// Check disk space
 	totalNeeded := localBytes + cloudBytes
 	freeSpace, err := getFreeDiskSpace(outputDir)
-	if err == nil {
+	if err != nil {
+		fmt.Printf("Warning: could not check disk space: %v\n\n", err)
+	} else {
 		if int64(freeSpace) < totalNeeded {
 			return fmt.Errorf("insufficient disk space: need %s, have %s",
 				formatBytes(totalNeeded), formatBytes(int64(freeSpace)))
@@ -280,18 +282,19 @@ func copyLocalFiles(assets []*models.Asset, outputDir string, totalBytes int64) 
 	}()
 
 	bar := NewSizeProgressBar(len(assets), totalBytes)
-	var succeeded, failed int64
+	var succeeded, failed int
 	var failedUUIDs []string
 	var failedItems []string
 
 	for result := range results {
-		bar.AddBytes(1, result.fileSize)
 		if result.err != nil {
 			failed++
 			failedUUIDs = append(failedUUIDs, result.uuid)
 			failedItems = append(failedItems, fmt.Sprintf("%s: %v", result.uuid, result.err))
+			bar.AddBytes(1, 0) // Don't count failed bytes in progress
 		} else {
 			succeeded++
+			bar.AddBytes(1, result.fileSize)
 		}
 	}
 	bar.Finish()

@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/cleanexit0/darwin-photos/internal/db"
@@ -375,22 +374,24 @@ func downloadFromCloud(client *icloud.Client, uuids []string, sizeMap map[string
 		close(results)
 	}()
 
-	var succeeded, failed, skipped int64
+	var succeeded, failed, skipped int
 	var failedUUIDs []string
 	var failedItems []string
 	startTime := time.Now()
 	bar := NewSizeProgressBar(count, validTotalBytes)
 
 	for result := range results {
-		bar.AddBytes(1, result.downloadBytes)
 		if result.err != nil {
-			atomic.AddInt64(&failed, 1)
+			failed++
 			failedUUIDs = append(failedUUIDs, result.uuid)
 			failedItems = append(failedItems, fmt.Sprintf("%s: %v", result.uuid, result.err))
+			bar.AddBytes(1, 0) // Don't count failed bytes in progress
 		} else if result.skipped {
-			atomic.AddInt64(&skipped, 1)
+			skipped++
+			bar.AddBytes(1, result.downloadBytes)
 		} else {
-			atomic.AddInt64(&succeeded, 1)
+			succeeded++
+			bar.AddBytes(1, result.downloadBytes)
 		}
 	}
 	bar.Finish()
