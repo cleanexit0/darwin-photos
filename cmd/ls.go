@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"text/tabwriter"
@@ -8,6 +9,7 @@ import (
 	"github.com/dustin/go-humanize"
 	"github.com/spf13/cobra"
 	"github.com/cleanexit0/darwin-photos/internal/db"
+	"github.com/cleanexit0/darwin-photos/internal/models"
 )
 
 var (
@@ -20,6 +22,7 @@ var (
 	lsSort       string
 	lsDesc       bool
 	lsTrashed    bool
+	lsJSON       bool
 )
 
 var lsCmd = &cobra.Command{
@@ -43,6 +46,7 @@ func init() {
 	lsCmd.Flags().StringVarP(&lsSort, "sort", "s", "date", "Sort by: date, name, size")
 	lsCmd.Flags().BoolVar(&lsDesc, "desc", true, "Sort descending (newest first)")
 	lsCmd.Flags().BoolVar(&lsTrashed, "trashed", false, "Include trashed items")
+	lsCmd.Flags().BoolVar(&lsJSON, "json", false, "Output as JSON")
 }
 
 func runLs(cmd *cobra.Command, args []string) error {
@@ -72,55 +76,111 @@ func runLs(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to list assets: %w", err)
 	}
 
-	// Get stats
-	_, localCount, cloudCount, _ := db.GetStats(photosDB.DB())
+	if lsJSON {
+		return outputLsJSON(assets, total)
+	}
 
-	// Create table using standard library tabwriter
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	return outputLsPlain(assets, total)
+}
 
-	// Header
-	fmt.Fprintln(w, "UUID\tFilename\tType\tSize\tDate\tStatus")
+func outputLsJSON(assets []*models.Asset, total int) error {
+	type jsonAsset struct {
+		UUID             string  `json:"uuid"`
+		Filename         string  `json:"filename"`
+		OriginalFilename string  `json:"original_filename,omitempty"`
+		Type             string  `json:"type"`
+		Size             int64   `json:"size"`
+		Date             string  `json:"date,omitempty"`
+		Status           string  `json:"status"`
+		Width            int     `json:"width,omitempty"`
+		Height           int     `json:"height,omitempty"`
+		Duration         float64 `json:"duration,omitempty"`
+	}
+
+	output := struct {
+		Assets []*jsonAsset `json:"assets"`
+		Count  int          `json:"count"`
+		Total  int          `json:"total"`
+	}{
+		Assets: make([]*jsonAsset, 0, len(assets)),
+		Count:  len(assets),
+		Total:  total,
+	}
 
 	for _, a := range assets {
-		// Truncate UUID for display
-		uuid := a.UUID
-		if len(uuid) > 8 {
-			uuid = uuid[:8]
+		ja := &jsonAsset{
+			UUID:     a.UUID,
+			Filename: a.Filename,
+			Type:     a.TypeString(),
+			Size:     a.FileSize,
+			Status:   a.StatusString(),
 		}
+		if a.OriginalFilename != "" && a.OriginalFilename != a.Filename {
+			ja.OriginalFilename = a.OriginalFilename
+		}
+		if !a.DateCreated.IsZero() {
+			ja.Date = a.DateCreated.Format("2006-01-02T15:04:05Z")
+		}
+		if a.Width > 0 {
+			ja.Width = a.Width
+		}
+		if a.Height > 0 {
+			ja.Height = a.Height
+		}
+		if a.Duration > 0 {
+			ja.Duration = a.Duration
+		}
+		output.Assets = append(output.Assets, ja)
+	}
 
-		// Format filename (use original if available)
+	data, err := json.MarshalIndent(output, "", "  ")
+	if err != nil {
+		return err
+	}
+	fmt.Println(string(data))
+	return nil
+}
+
+func outputLsPlain(assets []*models.Asset, total int) error {
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+
+	for _, a := range assets {
 		filename := a.OriginalFilename
 		if filename == "" {
 			filename = a.Filename
 		}
-		if len(filename) > 30 {
-			filename = filename[:27] + "..."
+		if len(filename) > 40 {
+			filename = filename[:37] + "..."
 		}
 
-		// Format date
-		date := ""
+		date := "-"
 		if !a.DateCreated.IsZero() {
-			date = a.DateCreated.Format("2006-01-02")
+			date = a.DateCreated.Format("Jan _2 15:04")
 		}
 
-		// Format size
 		size := humanize.Bytes(uint64(a.FileSize))
 
+		// Status: L=local, C=cloud-only
+		status := "L"
+		if !a.IsLocallyAvailable() {
+			status = "C"
+		}
+
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
-			uuid,
-			filename,
-			a.TypeString(),
+			status,
+			a.UUID,
 			size,
 			date,
-			a.StatusString(),
+			a.TypeString(),
+			filename,
 		)
 	}
 
 	w.Flush()
 
-	// Print summary
-	fmt.Printf("\nShowing %d of %d assets (Local: %d | Cloud: %d)\n",
-		len(assets), total, localCount, cloudCount)
+	if len(assets) < total {
+		fmt.Fprintf(os.Stderr, "# %d/%d shown\n", len(assets), total)
+	}
 
 	return nil
 }
