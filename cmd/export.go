@@ -52,7 +52,10 @@ From stdin:
 Export all cloud-only photos:
   darwin-photos export --all /Volumes/Backup
   darwin-photos export --all --workers 4 /Volumes/Backup
-  darwin-photos export --all --limit 100 /Volumes/Backup`,
+  darwin-photos export --all --limit 100 /Volumes/Backup
+
+Note: Use 'export' to download directly to any directory (e.g., external drive).
+Use 'sync' to download into your Photos library (uses local disk, no cookies needed).`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: runExport,
 }

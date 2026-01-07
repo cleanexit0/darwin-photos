@@ -44,7 +44,10 @@ From stdin:
 Sync all cloud-only photos:
   darwin-photos sync --all
   darwin-photos sync --all --workers 4
-  darwin-photos sync --all --limit 100`,
+  darwin-photos sync --all --limit 100
+
+Note: Use 'sync' to download into your Photos library (uses local disk).
+Use 'export' to download directly to any directory (e.g., external drive).`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runSync,
 }
