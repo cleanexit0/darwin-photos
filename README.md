@@ -2,6 +2,10 @@
 
 A CLI tool to interact with your iCloud Photos library on macOS. It reads your local Photos.sqlite database to list photos, show metadata, and download cloud-only photos without re-authenticating with iCloud.
 
+## Highlights
+
+- **Direct iCloud download** — Download photos directly from iCloud to any directory, bypassing the Photos app entirely
+
 ## Installation
 
 ```bash
