@@ -21,6 +21,8 @@ Local copies: 1,203 | Cloud downloads: 3,353
 
 It reads your local Photos database and uses iCloud's web API to download originals — no re-authentication needed after initial cookie import.
 
+Beyond backups, it's a full-fledged CLI for Apple Photos: list photos, filter by date or album, inspect metadata, and more.
+
 ## Installation
 
 ```bash
