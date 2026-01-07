@@ -162,24 +162,43 @@ func runBackup(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Disk space: %s required, %s available\n\n", formatBytes(totalNeeded), formatBytes(int64(freeSpace)))
 	}
 
+	startTime := time.Now()
+	var allFailedUUIDs []string
+
 	// Phase 1: Copy local files
 	if len(localAssets) > 0 {
 		fmt.Println("Copying local files...")
-		if err := copyLocalFiles(localAssets, outputDir, localBytes); err != nil {
+		failedUUIDs, err := copyLocalFiles(localAssets, outputDir, localBytes)
+		if err != nil {
 			return err
 		}
+		allFailedUUIDs = append(allFailedUUIDs, failedUUIDs...)
 		fmt.Println()
 	}
 
 	// Phase 2: Download cloud files
 	if len(cloudAssets) > 0 {
 		fmt.Println("Downloading from iCloud...")
-		if err := downloadCloudFiles(cloudAssets, outputDir, cloudBytes); err != nil {
+		failedUUIDs, err := downloadCloudFiles(cloudAssets, outputDir, cloudBytes)
+		if err != nil {
 			return err
+		}
+		allFailedUUIDs = append(allFailedUUIDs, failedUUIDs...)
+	}
+
+	// Write all failed UUIDs to file if any
+	if len(allFailedUUIDs) > 0 {
+		failedFile, err := writeFailedUUIDs(allFailedUUIDs)
+		if err != nil {
+			fmt.Printf("\nWarning: could not write failed UUIDs to file: %v\n", err)
+		} else {
+			fmt.Printf("\nFailed UUIDs written to: %s\n", failedFile)
+			fmt.Printf("Retry with: darwin-photos backup %s\n", outputDir)
 		}
 	}
 
-	fmt.Println("\nBackup complete!")
+	elapsed := time.Since(startTime)
+	fmt.Printf("\nBackup complete! (took %s)\n", elapsed.Round(time.Second))
 	return nil
 }
 
@@ -202,7 +221,8 @@ func scanBackupDir(dir string) (map[string]bool, error) {
 }
 
 // copyLocalFiles copies locally available files to the output directory using parallel workers
-func copyLocalFiles(assets []*models.Asset, outputDir string, totalBytes int64) error {
+// Returns a list of failed UUIDs for retry
+func copyLocalFiles(assets []*models.Asset, outputDir string, totalBytes int64) ([]string, error) {
 	type copyJob struct {
 		asset   *models.Asset
 		srcPath string
@@ -257,12 +277,14 @@ func copyLocalFiles(assets []*models.Asset, outputDir string, totalBytes int64) 
 
 	bar := NewSizeProgressBar(len(assets), totalBytes)
 	var succeeded, failed int64
+	var failedUUIDs []string
 	var failedItems []string
 
 	for result := range results {
 		bar.AddBytes(1, result.fileSize)
 		if result.err != nil {
 			failed++
+			failedUUIDs = append(failedUUIDs, result.uuid)
 			failedItems = append(failedItems, fmt.Sprintf("%s: %v", result.uuid, result.err))
 		} else {
 			succeeded++
@@ -278,7 +300,7 @@ func copyLocalFiles(assets []*models.Asset, outputDir string, totalBytes int64) 
 		}
 	}
 
-	return nil
+	return failedUUIDs, nil
 }
 
 // copyFile copies a single file from src to dst
@@ -304,17 +326,18 @@ func copyFile(src, dst string) error {
 }
 
 // downloadCloudFiles downloads cloud-only files from iCloud
-func downloadCloudFiles(assets []*models.Asset, outputDir string, totalBytes int64) error {
+// Returns a list of failed UUIDs for retry
+func downloadCloudFiles(assets []*models.Asset, outputDir string, totalBytes int64) ([]string, error) {
 	// Get iCloud client
 	client, err := getICloudClient()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	// Open database for CloudKit GUID lookup
 	photosDB, err := db.Open(getLibraryPath())
 	if err != nil {
-		return fmt.Errorf("failed to open Photos database: %w", err)
+		return nil, fmt.Errorf("failed to open Photos database: %w", err)
 	}
 	defer photosDB.Close()
 
@@ -326,7 +349,7 @@ func downloadCloudFiles(assets []*models.Asset, outputDir string, totalBytes int
 
 	guidMap, err := db.GetCloudMasterGUIDs(photosDB.DB(), uuids)
 	if err != nil {
-		return fmt.Errorf("failed to look up CloudKit GUIDs: %w", err)
+		return nil, fmt.Errorf("failed to look up CloudKit GUIDs: %w", err)
 	}
 
 	// Build jobs for assets that have CloudKit GUIDs
@@ -348,7 +371,7 @@ func downloadCloudFiles(assets []*models.Asset, outputDir string, totalBytes int
 
 	if len(validJobs) == 0 {
 		fmt.Println("No cloud files to download")
-		return nil
+		return nil, nil
 	}
 
 	// Worker pool for downloads
@@ -420,18 +443,9 @@ func downloadCloudFiles(assets []*models.Asset, outputDir string, totalBytes int
 		for _, item := range failedItems {
 			fmt.Printf("    - %s\n", item)
 		}
-
-		// Write failed UUIDs for retry
-		failedFile, err := writeFailedUUIDs(failedUUIDs)
-		if err != nil {
-			fmt.Printf("  Warning: could not write failed UUIDs to file: %v\n", err)
-		} else {
-			fmt.Printf("\nFailed UUIDs written to: %s\n", failedFile)
-			fmt.Printf("Retry with: darwin-photos export --from-file %s %s\n", failedFile, outputDir)
-		}
 	}
 
-	return nil
+	return failedUUIDs, nil
 }
 
 // getFreeDiskSpace returns available disk space in bytes for the given path
