@@ -21,6 +21,8 @@ var (
 	syncWorkers int
 	syncLimit   int
 	syncFile    string
+	syncStart   string
+	syncEnd     string
 )
 
 var syncCmd = &cobra.Command{
@@ -58,6 +60,8 @@ func init() {
 	syncCmd.Flags().StringVarP(&syncFile, "from-file", "f", "", "File containing UUIDs (one per line)")
 	syncCmd.Flags().IntVarP(&syncWorkers, "workers", "w", 16, "Number of parallel workers")
 	syncCmd.Flags().IntVarP(&syncLimit, "limit", "n", 0, "Limit number of photos to sync (0 = unlimited)")
+	syncCmd.Flags().StringVar(&syncStart, "start", "", "Start date (YYYY-MM-DD), inclusive")
+	syncCmd.Flags().StringVar(&syncEnd, "end", "", "End date (YYYY-MM-DD), inclusive")
 }
 
 func runSync(cmd *cobra.Command, args []string) error {
@@ -98,6 +102,22 @@ func runSync(cmd *cobra.Command, args []string) error {
 }
 
 func runSyncAll() error {
+	// Parse date filters
+	var startDate, endDate time.Time
+	var err error
+	if syncStart != "" {
+		startDate, err = time.Parse("2006-01-02", syncStart)
+		if err != nil {
+			return fmt.Errorf("invalid start date %q: use YYYY-MM-DD format", syncStart)
+		}
+	}
+	if syncEnd != "" {
+		endDate, err = time.Parse("2006-01-02", syncEnd)
+		if err != nil {
+			return fmt.Errorf("invalid end date %q: use YYYY-MM-DD format", syncEnd)
+		}
+	}
+
 	// Ensure Photos authorization
 	if err := photokit.EnsureAuthorized(); err != nil {
 		return err
@@ -114,6 +134,8 @@ func runSyncAll() error {
 	opts := db.ListOptions{
 		CloudOnly: true,
 		Limit:     syncLimit,
+		StartDate: startDate,
+		EndDate:   endDate,
 	}
 	assets, total, err := db.ListAssets(photosDB.DB(), opts)
 	if err != nil {

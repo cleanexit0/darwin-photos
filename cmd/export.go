@@ -21,6 +21,8 @@ var (
 	exportLimit   int
 	exportFile    string
 	exportRetry   int
+	exportStart   string
+	exportEnd     string
 )
 
 var exportCmd = &cobra.Command{
@@ -100,6 +102,8 @@ func init() {
 	exportCmd.Flags().IntVarP(&exportWorkers, "workers", "w", 16, "Number of parallel workers")
 	exportCmd.Flags().IntVarP(&exportLimit, "limit", "n", 0, "Limit number of photos to export (0 = unlimited)")
 	exportCmd.Flags().IntVarP(&exportRetry, "retry", "r", 3, "Number of retry attempts for failed downloads")
+	exportCmd.Flags().StringVar(&exportStart, "start", "", "Start date (YYYY-MM-DD), inclusive")
+	exportCmd.Flags().StringVar(&exportEnd, "end", "", "End date (YYYY-MM-DD), inclusive")
 }
 
 func runExport(cmd *cobra.Command, args []string) error {
@@ -264,6 +268,22 @@ func getICloudClient() (*icloud.Client, error) {
 }
 
 func runExportAll(outputDir string) error {
+	// Parse date filters
+	var startDate, endDate time.Time
+	var err error
+	if exportStart != "" {
+		startDate, err = time.Parse("2006-01-02", exportStart)
+		if err != nil {
+			return fmt.Errorf("invalid start date %q: use YYYY-MM-DD format", exportStart)
+		}
+	}
+	if exportEnd != "" {
+		endDate, err = time.Parse("2006-01-02", exportEnd)
+		if err != nil {
+			return fmt.Errorf("invalid end date %q: use YYYY-MM-DD format", exportEnd)
+		}
+	}
+
 	if err := validateExportDir(outputDir); err != nil {
 		return err
 	}
@@ -283,6 +303,8 @@ func runExportAll(outputDir string) error {
 	opts := db.ListOptions{
 		CloudOnly: true,
 		Limit:     exportLimit,
+		StartDate: startDate,
+		EndDate:   endDate,
 	}
 	assets, total, err := db.ListAssets(photosDB.DB(), opts)
 	if err != nil {

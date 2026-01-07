@@ -48,6 +48,8 @@ type ListOptions struct {
 	IncludeTrashed bool
 	SortBy         string // "date", "name", "size"
 	SortDescending bool
+	StartDate      time.Time // Include photos on or after this date (inclusive)
+	EndDate        time.Time // Include photos on or before this date (inclusive)
 }
 
 // ListAssets returns a list of assets based on the options
@@ -104,6 +106,20 @@ WHERE 1=1
 		query += " AND a.ZKIND = 0"
 	} else if opts.VideosOnly {
 		query += " AND a.ZKIND = 1"
+	}
+
+	// Filter by date range (Core Data timestamps: seconds since Jan 1, 2001)
+	if !opts.StartDate.IsZero() {
+		startSeconds := opts.StartDate.Sub(coreDataEpoch).Seconds()
+		query += " AND a.ZDATECREATED >= ?"
+		args = append(args, startSeconds)
+	}
+	if !opts.EndDate.IsZero() {
+		// Add 1 day minus 1 second to make end date inclusive (23:59:59)
+		endOfDay := opts.EndDate.Add(24*time.Hour - time.Second)
+		endSeconds := endOfDay.Sub(coreDataEpoch).Seconds()
+		query += " AND a.ZDATECREATED <= ?"
+		args = append(args, endSeconds)
 	}
 
 	// Sorting
@@ -214,6 +230,7 @@ WHERE 1=1
 
 	// Get total count (without pagination)
 	countQuery := `SELECT COUNT(*) FROM ZASSET a WHERE 1=1`
+	var countArgs []interface{}
 	if !opts.IncludeTrashed {
 		countQuery += " AND (a.ZTRASHEDSTATE = 0 OR a.ZTRASHEDSTATE IS NULL)"
 	}
@@ -227,9 +244,20 @@ WHERE 1=1
 	} else if opts.VideosOnly {
 		countQuery += " AND a.ZKIND = 1"
 	}
+	if !opts.StartDate.IsZero() {
+		startSeconds := opts.StartDate.Sub(coreDataEpoch).Seconds()
+		countQuery += " AND a.ZDATECREATED >= ?"
+		countArgs = append(countArgs, startSeconds)
+	}
+	if !opts.EndDate.IsZero() {
+		endOfDay := opts.EndDate.Add(24*time.Hour - time.Second)
+		endSeconds := endOfDay.Sub(coreDataEpoch).Seconds()
+		countQuery += " AND a.ZDATECREATED <= ?"
+		countArgs = append(countArgs, endSeconds)
+	}
 
 	var total int
-	db.QueryRow(countQuery).Scan(&total)
+	db.QueryRow(countQuery, countArgs...).Scan(&total)
 
 	return assets, total, nil
 }
@@ -266,7 +294,7 @@ SELECT
      ORDER BY r.ZDATALENGTH DESC LIMIT 1) as data_length
 FROM ZASSET a
 LEFT JOIN ZADDITIONALASSETATTRIBUTES aa ON a.ZADDITIONALATTRIBUTES = aa.Z_PK
-WHERE a.ZUUID = ? OR a.ZFILENAME LIKE ?
+WHERE a.ZUUID = ? OR a.ZUUID LIKE ?
 LIMIT 1
 `
 	row := db.QueryRow(query, uuid, uuid+"%")
@@ -600,5 +628,3 @@ WHERE (a.ZTRASHEDSTATE = 0 OR a.ZTRASHEDSTATE IS NULL)
 	cloud = total - local
 	return
 }
-
-// TODO: avoid ZUUID LIKE if possible

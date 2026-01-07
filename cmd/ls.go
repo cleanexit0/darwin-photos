@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"text/tabwriter"
+	"time"
 
 	"github.com/cleanexit0/darwin-photos/internal/db"
 	"github.com/cleanexit0/darwin-photos/internal/models"
@@ -22,6 +23,8 @@ var (
 	lsDesc       bool
 	lsTrashed    bool
 	lsJSON       bool
+	lsStart      string
+	lsEnd        string
 )
 
 var lsCmd = &cobra.Command{
@@ -46,9 +49,27 @@ func init() {
 	lsCmd.Flags().BoolVar(&lsDesc, "desc", true, "Sort descending (newest first)")
 	lsCmd.Flags().BoolVar(&lsTrashed, "trashed", false, "Include trashed items")
 	lsCmd.Flags().BoolVar(&lsJSON, "json", false, "Output as JSON")
+	lsCmd.Flags().StringVar(&lsStart, "start", "", "Start date (YYYY-MM-DD), inclusive")
+	lsCmd.Flags().StringVar(&lsEnd, "end", "", "End date (YYYY-MM-DD), inclusive")
 }
 
 func runLs(cmd *cobra.Command, args []string) error {
+	// Parse date filters
+	var startDate, endDate time.Time
+	var err error
+	if lsStart != "" {
+		startDate, err = time.Parse("2006-01-02", lsStart)
+		if err != nil {
+			return fmt.Errorf("invalid start date %q: use YYYY-MM-DD format", lsStart)
+		}
+	}
+	if lsEnd != "" {
+		endDate, err = time.Parse("2006-01-02", lsEnd)
+		if err != nil {
+			return fmt.Errorf("invalid end date %q: use YYYY-MM-DD format", lsEnd)
+		}
+	}
+
 	// Open database
 	photosDB, err := db.Open(getLibraryPath())
 	if err != nil {
@@ -67,6 +88,8 @@ func runLs(cmd *cobra.Command, args []string) error {
 		IncludeTrashed: lsTrashed,
 		SortBy:         lsSort,
 		SortDescending: lsDesc,
+		StartDate:      startDate,
+		EndDate:        endDate,
 	}
 
 	// Query assets
