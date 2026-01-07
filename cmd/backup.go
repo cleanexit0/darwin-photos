@@ -112,7 +112,6 @@ func runBackup(cmd *cobra.Command, args []string) error {
 	// Categorize assets: already backed up, local, cloud-only
 	var localAssets, cloudAssets []*models.Asset
 	var localBytes, cloudBytes int64
-	libraryPath := getLibraryPath()
 
 	for _, asset := range assets {
 		// Build expected filename (UUID + extension)
@@ -128,11 +127,7 @@ func runBackup(cmd *cobra.Command, args []string) error {
 
 		// Check if file actually exists on disk (database can be out of sync)
 		if asset.IsLocallyAvailable() {
-			localPath := filepath.Join(libraryPath, "originals", asset.Directory, asset.Filename)
-			if asset.Directory == "" && len(asset.UUID) > 0 {
-				localPath = filepath.Join(libraryPath, "originals", string(asset.UUID[0]), asset.Filename)
-			}
-			if _, err := os.Stat(localPath); err == nil {
+			if _, err := os.Stat(buildLocalPath(asset)); err == nil {
 				localAssets = append(localAssets, asset)
 				localBytes += asset.FileSize
 				continue

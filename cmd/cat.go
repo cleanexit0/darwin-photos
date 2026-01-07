@@ -3,7 +3,6 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
-	"path/filepath"
 	"strings"
 
 	"github.com/cleanexit0/darwin-photos/internal/db"
@@ -220,13 +219,4 @@ func outputFormatted(asset *models.Asset, ext *models.ExtendedAttributes, albums
 	}
 
 	return nil
-}
-
-func buildLocalPath(asset *models.Asset) string {
-	libraryPath := getLibraryPath()
-	dir := asset.Directory
-	if dir == "" && len(asset.UUID) > 0 {
-		dir = string(asset.UUID[0])
-	}
-	return filepath.Join(libraryPath, "originals", dir, asset.Filename)
 }
