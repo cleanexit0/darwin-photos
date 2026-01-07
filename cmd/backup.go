@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/cleanexit0/darwin-photos/internal/db"
@@ -189,7 +188,7 @@ func runBackup(cmd *cobra.Command, args []string) error {
 	// Phase 2: Download cloud files
 	if len(cloudAssets) > 0 {
 		fmt.Println("Downloading from iCloud...")
-		failedUUIDs, err := downloadCloudFiles(cloudAssets, outputDir, cloudBytes)
+		failedUUIDs, err := downloadCloudFiles(cloudAssets, outputDir)
 		if err != nil {
 			return err
 		}
@@ -337,125 +336,28 @@ func copyFile(src, dst string) error {
 
 // downloadCloudFiles downloads cloud-only files from iCloud
 // Returns a list of failed UUIDs for retry
-func downloadCloudFiles(assets []*models.Asset, outputDir string, totalBytes int64) ([]string, error) {
+func downloadCloudFiles(assets []*models.Asset, outputDir string) ([]string, error) {
 	// Get iCloud client
 	client, err := getICloudClient()
 	if err != nil {
 		return nil, err
 	}
 
-	// Open database for CloudKit GUID lookup
-	photosDB, err := db.Open(getLibraryPath())
-	if err != nil {
-		return nil, fmt.Errorf("failed to open Photos database: %w", err)
-	}
-	defer photosDB.Close()
-
-	// Get UUIDs and look up CloudKit GUIDs
+	// Build UUID list and size map
 	uuids := make([]string, len(assets))
+	sizeMap := make(map[string]int64)
 	for i, asset := range assets {
 		uuids[i] = asset.UUID
+		sizeMap[asset.UUID] = asset.FileSize
 	}
 
-	guidMap, err := db.GetCloudMasterGUIDs(photosDB.DB(), uuids)
-	if err != nil {
-		return nil, fmt.Errorf("failed to look up CloudKit GUIDs: %w", err)
+	config := &exportConfig{
+		workers:    backupWorkers,
+		maxRetries: backupRetry,
+		outputDir:  outputDir,
 	}
 
-	// Build jobs for assets that have CloudKit GUIDs
-	type cloudJob struct {
-		asset        *models.Asset
-		cloudKitGUID string
-	}
-
-	var validJobs []cloudJob
-	var validTotalBytes int64
-	for _, asset := range assets {
-		if guid, ok := guidMap[asset.UUID]; ok {
-			validJobs = append(validJobs, cloudJob{asset: asset, cloudKitGUID: guid})
-			validTotalBytes += asset.FileSize
-		} else {
-			fmt.Printf("Warning: No CloudKit GUID found for %s (may be local-only)\n", asset.UUID)
-		}
-	}
-
-	if len(validJobs) == 0 {
-		fmt.Println("No cloud files to download")
-		return nil, nil
-	}
-
-	// Worker pool for downloads
-	jobs := make(chan cloudJob, len(validJobs))
-	results := make(chan exportResult, len(validJobs))
-
-	var wg sync.WaitGroup
-	for w := 0; w < backupWorkers; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for job := range jobs {
-				ext := filepath.Ext(job.asset.Filename)
-				if ext == "" {
-					ext = ".jpg"
-				}
-				outputPath := filepath.Join(outputDir, job.asset.UUID+ext)
-
-				// Get download URL
-				assetInfo, err := client.GetDownloadURL(job.cloudKitGUID)
-				if err != nil {
-					results <- exportResult{uuid: job.asset.UUID, err: fmt.Errorf("failed to get download URL: %w", err)}
-					continue
-				}
-
-				// Download with retry
-				if err := client.DownloadPhotoWithRetry(assetInfo.DownloadURL, outputPath, backupRetry); err != nil {
-					results <- exportResult{uuid: job.asset.UUID, err: err}
-					continue
-				}
-
-				results <- exportResult{uuid: job.asset.UUID, filename: outputPath, downloadBytes: job.asset.FileSize}
-			}
-		}()
-	}
-
-	// Send jobs
-	for _, job := range validJobs {
-		jobs <- job
-	}
-	close(jobs)
-
-	// Collect results
-	go func() {
-		wg.Wait()
-		close(results)
-	}()
-
-	var succeeded, failed int64
-	var failedUUIDs []string
-	var failedItems []string
-	bar := NewSizeProgressBar(len(validJobs), validTotalBytes)
-
-	for result := range results {
-		bar.AddBytes(1, result.downloadBytes)
-		if result.err != nil {
-			atomic.AddInt64(&failed, 1)
-			failedUUIDs = append(failedUUIDs, result.uuid)
-			failedItems = append(failedItems, fmt.Sprintf("%s: %v", result.uuid, result.err))
-		} else {
-			atomic.AddInt64(&succeeded, 1)
-		}
-	}
-	bar.Finish()
-
-	fmt.Printf("  Downloaded: %d\n", succeeded)
-	if failed > 0 {
-		fmt.Printf("  Failed: %d\n", failed)
-		for _, item := range failedItems {
-			fmt.Printf("    - %s\n", item)
-		}
-	}
-
-	return failedUUIDs, nil
+	return downloadFromCloud(client, uuids, sizeMap, config)
 }
 
 // getFreeDiskSpace returns available disk space in bytes for the given path

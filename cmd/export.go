@@ -290,22 +290,50 @@ type exportResult struct {
 }
 
 type exportConfig struct {
+	workers    int
 	maxRetries int
 	outputDir  string
 }
 
 func exportPhotos(client *icloud.Client, uuids []string, sizeMap map[string]int64, outputDir string) error {
+	config := &exportConfig{
+		workers:    exportWorkers,
+		maxRetries: exportRetry,
+		outputDir:  outputDir,
+	}
+	failedUUIDs, err := downloadFromCloud(client, uuids, sizeMap, config)
+	if err != nil {
+		return err
+	}
+
+	if len(failedUUIDs) > 0 {
+		// Write failed UUIDs to ~/.darwin-photos/ with timestamp
+		failedFile, err := writeFailedUUIDs(failedUUIDs)
+		if err != nil {
+			fmt.Printf("  Warning: could not write failed UUIDs to file: %v\n", err)
+		} else {
+			fmt.Printf("\nFailed UUIDs written to: %s\n", failedFile)
+			fmt.Printf("Retry with: darwin-photos export --from-file %s %s\n", failedFile, outputDir)
+		}
+		return fmt.Errorf("%d exports failed", len(failedUUIDs))
+	}
+	return nil
+}
+
+// downloadFromCloud downloads photos from iCloud and returns list of failed UUIDs.
+// This is shared between export and backup commands.
+func downloadFromCloud(client *icloud.Client, uuids []string, sizeMap map[string]int64, config *exportConfig) ([]string, error) {
 	// Open Photos database to look up CloudKit GUIDs
 	photosDB, err := db.Open(getLibraryPath())
 	if err != nil {
-		return fmt.Errorf("failed to open Photos database: %w", err)
+		return nil, fmt.Errorf("failed to open Photos database: %w", err)
 	}
 	defer photosDB.Close()
 
 	// Map UUIDs to CloudKit GUIDs
 	guidMap, err := db.GetCloudMasterGUIDs(photosDB.DB(), uuids)
 	if err != nil {
-		return fmt.Errorf("failed to look up CloudKit GUIDs: %w", err)
+		return nil, fmt.Errorf("failed to look up CloudKit GUIDs: %w", err)
 	}
 
 	// Filter to only UUIDs that have CloudKit GUIDs
@@ -322,21 +350,17 @@ func exportPhotos(client *icloud.Client, uuids []string, sizeMap map[string]int6
 	}
 
 	if len(validJobs) == 0 {
-		return fmt.Errorf("no valid CloudKit GUIDs found for the given UUIDs")
+		fmt.Println("No cloud files to download")
+		return nil, nil
 	}
 
 	count := len(validJobs)
-
-	config := &exportConfig{
-		maxRetries: exportRetry,
-		outputDir:  outputDir,
-	}
 
 	jobs := make(chan exportJob, count)
 	results := make(chan exportResult, count)
 
 	var wg sync.WaitGroup
-	for w := 0; w < exportWorkers; w++ {
+	for w := 0; w < config.workers; w++ {
 		wg.Add(1)
 		go exportWorker(client, config, jobs, results, &wg)
 	}
@@ -352,7 +376,6 @@ func exportPhotos(client *icloud.Client, uuids []string, sizeMap map[string]int6
 	}()
 
 	var succeeded, failed, skipped int64
-	var downloadedBytes int64
 	var failedUUIDs []string
 	var failedItems []string
 	startTime := time.Now()
@@ -366,10 +389,8 @@ func exportPhotos(client *icloud.Client, uuids []string, sizeMap map[string]int6
 			failedItems = append(failedItems, fmt.Sprintf("%s: %v", result.uuid, result.err))
 		} else if result.skipped {
 			atomic.AddInt64(&skipped, 1)
-			downloadedBytes += result.downloadBytes // Count skipped file sizes too
 		} else {
 			atomic.AddInt64(&succeeded, 1)
-			downloadedBytes += result.downloadBytes
 		}
 	}
 	bar.Finish()
@@ -385,21 +406,9 @@ func exportPhotos(client *icloud.Client, uuids []string, sizeMap map[string]int6
 		for _, item := range failedItems {
 			fmt.Printf("    - %s\n", item)
 		}
-
-		// Write failed UUIDs to ~/.darwin-photos/ with timestamp
-		failedFile, err := writeFailedUUIDs(failedUUIDs)
-		if err != nil {
-			fmt.Printf("  Warning: could not write failed UUIDs to file: %v\n", err)
-		} else {
-			fmt.Printf("\nFailed UUIDs written to: %s\n", failedFile)
-			fmt.Printf("Retry with: darwin-photos export --from-file %s %s\n", failedFile, outputDir)
-		}
 	}
 
-	if failed > 0 {
-		return fmt.Errorf("%d exports failed", failed)
-	}
-	return nil
+	return failedUUIDs, nil
 }
 
 func writeFailedUUIDs(uuids []string) (string, error) {
