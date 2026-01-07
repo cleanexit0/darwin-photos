@@ -24,7 +24,7 @@ var (
 )
 
 var syncCmd = &cobra.Command{
-	Use:   "sync [uuid] | --file <path> | - | --all",
+	Use:   "sync [uuid] | --from-file <path> | - | --all",
 	Short: "Sync cloud photos to the Photos library",
 	Long: `Sync cloud-only photos from iCloud to the local Photos library.
 
@@ -35,7 +35,7 @@ Single sync:
   darwin-photos sync E448C88A
 
 From file (one UUID per line):
-  darwin-photos sync --file uuids.txt
+  darwin-photos sync --from-file uuids.txt
 
 From stdin:
   cat uuids.txt | darwin-photos sync -
@@ -52,7 +52,7 @@ Sync all cloud-only photos:
 func init() {
 	rootCmd.AddCommand(syncCmd)
 	syncCmd.Flags().BoolVar(&syncAll, "all", false, "Sync all cloud-only photos")
-	syncCmd.Flags().StringVarP(&syncFile, "file", "f", "", "File containing UUIDs (one per line)")
+	syncCmd.Flags().StringVarP(&syncFile, "from-file", "f", "", "File containing UUIDs (one per line)")
 	syncCmd.Flags().IntVarP(&syncWorkers, "workers", "w", 4, "Number of parallel workers")
 	syncCmd.Flags().IntVarP(&syncLimit, "limit", "n", 0, "Limit number of photos to sync (0 = unlimited)")
 }
@@ -61,7 +61,7 @@ func runSync(cmd *cobra.Command, args []string) error {
 	// All mode: all cloud-only photos
 	if syncAll {
 		if len(args) != 0 || syncFile != "" {
-			return fmt.Errorf("--all cannot be combined with UUID or --file")
+			return fmt.Errorf("--all cannot be combined with UUID or --from-file")
 		}
 		return runSyncAll()
 	}
@@ -69,7 +69,7 @@ func runSync(cmd *cobra.Command, args []string) error {
 	// File input mode
 	if syncFile != "" {
 		if len(args) != 0 {
-			return fmt.Errorf("--file cannot be combined with UUID argument")
+			return fmt.Errorf("--from-file cannot be combined with UUID argument")
 		}
 		uuids, err := readUUIDsFromFile(syncFile)
 		if err != nil {
@@ -89,7 +89,7 @@ func runSync(cmd *cobra.Command, args []string) error {
 
 	// Single UUID mode
 	if len(args) != 1 {
-		return fmt.Errorf("requires a UUID, --file, or --all")
+		return fmt.Errorf("requires a UUID, --from-file, or --all")
 	}
 	return runSyncList([]string{args[0]})
 }

@@ -24,7 +24,7 @@ var (
 )
 
 var exportCmd = &cobra.Command{
-	Use:   "export [uuid] | --file <path> | - | --all <output-dir>",
+	Use:   "export [uuid] | --from-file <path> | - | --all <output-dir>",
 	Short: "Export photos directly from iCloud to a directory",
 	Long: `Export photos directly from iCloud to a directory, bypassing local Photos library.
 
@@ -44,7 +44,7 @@ Single export:
   darwin-photos export E448C88A /Volumes/Backup
 
 From file (one UUID per line):
-  darwin-photos export --file uuids.txt /Volumes/Backup
+  darwin-photos export --from-file uuids.txt /Volumes/Backup
 
 From stdin:
   cat uuids.txt | darwin-photos export - /Volumes/Backup
@@ -60,7 +60,7 @@ Export all cloud-only photos:
 func init() {
 	rootCmd.AddCommand(exportCmd)
 	exportCmd.Flags().BoolVar(&exportAll, "all", false, "Export all cloud-only photos")
-	exportCmd.Flags().StringVarP(&exportFile, "file", "f", "", "File containing UUIDs (one per line)")
+	exportCmd.Flags().StringVarP(&exportFile, "from-file", "f", "", "File containing UUIDs (one per line)")
 	exportCmd.Flags().IntVarP(&exportWorkers, "workers", "w", 4, "Number of parallel workers")
 	exportCmd.Flags().IntVarP(&exportLimit, "limit", "n", 0, "Limit number of photos to export (0 = unlimited)")
 	exportCmd.Flags().IntVarP(&exportRetry, "retry", "r", 3, "Number of retry attempts for failed downloads")
@@ -94,7 +94,7 @@ func runExport(cmd *cobra.Command, args []string) error {
 
 	if exportFile != "" {
 		if len(args) != 1 {
-			return fmt.Errorf("--file requires output directory")
+			return fmt.Errorf("--from-file requires output directory")
 		}
 		outputDir = args[0]
 		var err error
@@ -117,7 +117,7 @@ func runExport(cmd *cobra.Command, args []string) error {
 
 	// Single UUID mode
 	if len(args) != 2 {
-		return fmt.Errorf("requires UUID and output directory, or use --all/--file")
+		return fmt.Errorf("requires UUID and output directory, or use --all/--from-file")
 	}
 	return runExportList([]string{args[0]}, args[1])
 }
@@ -405,7 +405,7 @@ func exportPhotos(client *icloud.Client, uuids []string, outputDir string) error
 			fmt.Printf("  Warning: could not write failed UUIDs to file: %v\n", err)
 		} else {
 			fmt.Printf("\nFailed UUIDs written to: %s\n", failedFile)
-			fmt.Printf("Retry with: darwin-photos export --file %s %s\n", failedFile, outputDir)
+			fmt.Printf("Retry with: darwin-photos export --from-file %s %s\n", failedFile, outputDir)
 		}
 	}
 
