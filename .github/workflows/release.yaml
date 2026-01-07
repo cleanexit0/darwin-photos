@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   release-darwin-amd64:
-    runs-on: macos-13
+    runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@v4
         with:
@@ -31,7 +31,7 @@ jobs:
           path: darwin-photos_${{ github.ref_name }}_darwin_amd64.tar.gz
 
   release-darwin-arm64:
-    runs-on: macos-14
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
         with:
