@@ -16,17 +16,13 @@ import (
 )
 
 var (
-	exportAll     bool
 	exportWorkers int
-	exportLimit   int
 	exportFile    string
 	exportRetry   int
-	exportStart   string
-	exportEnd     string
 )
 
 var exportCmd = &cobra.Command{
-	Use:   "export [uuid] <output-dir>",
+	Use:   "export <uuid> <output-dir>",
 	Short: "Export photos directly from iCloud to a directory",
 	Long: `Export photos directly from iCloud to a directory, bypassing local Photos library.
 
@@ -50,15 +46,11 @@ From file (one UUID per line):
   darwin-photos export --from-file uuids.txt /Volumes/Backup
 
 From stdin:
-  cat uuids.txt | darwin-photos export - /Volumes/Backup
-
-Export all cloud-only photos:
-  darwin-photos export --all /Volumes/Backup
-  darwin-photos export --all --workers 4 /Volumes/Backup
-  darwin-photos export --all --limit 100 /Volumes/Backup
+  darwin-photos ls --cloud-only | darwin-photos export - /Volumes/Backup
 
 Note: Use 'export' to download directly to any directory (e.g., external drive).
-Use 'sync' to download into your Photos library (uses local disk, no cookies needed).`,
+Use 'sync' to download into your Photos library (uses local disk, no cookies needed).
+Use 'backup' for incremental backups that handle both local and cloud photos.`,
 	RunE: runExport,
 }
 
@@ -97,27 +89,16 @@ func init() {
 	exportCmd.AddCommand(importCookiesCmd)
 	exportCmd.AddCommand(logoutCmd)
 
-	exportCmd.Flags().BoolVar(&exportAll, "all", false, "Export all cloud-only photos")
 	exportCmd.Flags().StringVarP(&exportFile, "from-file", "f", "", "File containing UUIDs (one per line)")
 	exportCmd.Flags().IntVarP(&exportWorkers, "workers", "w", 16, "Number of parallel workers")
-	exportCmd.Flags().IntVarP(&exportLimit, "limit", "n", 0, "Limit number of photos to export (0 = unlimited)")
 	exportCmd.Flags().IntVarP(&exportRetry, "retry", "r", 3, "Number of retry attempts for failed downloads")
-	exportCmd.Flags().StringVar(&exportStart, "start", "", "Start date (YYYY-MM-DD), inclusive")
-	exportCmd.Flags().StringVar(&exportEnd, "end", "", "End date (YYYY-MM-DD), inclusive")
 }
 
 func runExport(cmd *cobra.Command, args []string) error {
 	var outputDir string
 	var uuids []string
 
-	if exportAll {
-		if len(args) != 1 {
-			return fmt.Errorf("--all requires output directory")
-		}
-		outputDir = args[0]
-		return runExportAll(outputDir)
-	}
-
+	// File input mode
 	if exportFile != "" {
 		if len(args) != 1 {
 			return fmt.Errorf("--from-file requires output directory")
@@ -131,6 +112,7 @@ func runExport(cmd *cobra.Command, args []string) error {
 		return runExportList(uuids, outputDir)
 	}
 
+	// Stdin mode
 	if len(args) == 2 && args[0] == "-" {
 		outputDir = args[1]
 		var err error
@@ -143,7 +125,7 @@ func runExport(cmd *cobra.Command, args []string) error {
 
 	// Single UUID mode
 	if len(args) != 2 {
-		return fmt.Errorf("requires UUID and output directory, or use --all/--from-file")
+		return fmt.Errorf("requires UUID and output directory, or use --from-file/-")
 	}
 	return runExportList([]string{args[0]}, args[1])
 }
@@ -265,78 +247,6 @@ func getICloudClient() (*icloud.Client, error) {
 	}
 
 	return client, nil
-}
-
-func runExportAll(outputDir string) error {
-	// Parse date filters
-	var startDate, endDate time.Time
-	var err error
-	if exportStart != "" {
-		startDate, err = time.Parse("2006-01-02", exportStart)
-		if err != nil {
-			return fmt.Errorf("invalid start date %q: use YYYY-MM-DD format", exportStart)
-		}
-	}
-	if exportEnd != "" {
-		endDate, err = time.Parse("2006-01-02", exportEnd)
-		if err != nil {
-			return fmt.Errorf("invalid end date %q: use YYYY-MM-DD format", exportEnd)
-		}
-	}
-
-	if err := validateExportDir(outputDir); err != nil {
-		return err
-	}
-
-	client, err := getICloudClient()
-	if err != nil {
-		return err
-	}
-
-	// Get cloud-only assets from local database
-	photosDB, err := db.Open(getLibraryPath())
-	if err != nil {
-		return fmt.Errorf("failed to open Photos database: %w", err)
-	}
-	defer photosDB.Close()
-
-	opts := db.ListOptions{
-		CloudOnly: true,
-		Limit:     exportLimit,
-		StartDate: startDate,
-		EndDate:   endDate,
-	}
-	assets, total, err := db.ListAssets(photosDB.DB(), opts)
-	if err != nil {
-		return fmt.Errorf("failed to list assets: %w", err)
-	}
-
-	if len(assets) == 0 {
-		fmt.Println("No cloud-only photos to export")
-		return nil
-	}
-
-	// Build UUID-to-size map and calculate total size
-	sizeMap := make(map[string]int64)
-	var totalBytes int64
-	for _, asset := range assets {
-		sizeMap[asset.UUID] = asset.FileSize
-		totalBytes += asset.FileSize
-	}
-
-	// Extract UUIDs
-	uuids := make([]string, len(assets))
-	for i, asset := range assets {
-		uuids[i] = asset.UUID
-	}
-
-	if exportLimit > 0 && exportLimit < total {
-		fmt.Printf("Exporting %d of %d cloud-only photos (%s)\n", len(uuids), total, formatBytes(totalBytes))
-	} else {
-		fmt.Printf("Exporting %d cloud-only photos (%s)\n", len(uuids), formatBytes(totalBytes))
-	}
-
-	return exportPhotos(client, uuids, sizeMap, outputDir)
 }
 
 func runExportList(uuids []string, outputDir string) error {

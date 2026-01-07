@@ -10,23 +10,19 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/spf13/cobra"
 	"github.com/cleanexit0/darwin-photos/internal/db"
 	"github.com/cleanexit0/darwin-photos/internal/models"
 	"github.com/cleanexit0/darwin-photos/internal/photokit"
+	"github.com/spf13/cobra"
 )
 
 var (
-	syncAll     bool
 	syncWorkers int
-	syncLimit   int
 	syncFile    string
-	syncStart   string
-	syncEnd     string
 )
 
 var syncCmd = &cobra.Command{
-	Use:   "sync [uuid] | --from-file <path> | - | --all",
+	Use:   "sync <uuid> | --from-file <path> | -",
 	Short: "Sync cloud photos to the Photos library",
 	Long: `Sync cloud-only photos from iCloud to the local Photos library.
 
@@ -40,39 +36,22 @@ From file (one UUID per line):
   darwin-photos sync --from-file uuids.txt
 
 From stdin:
-  cat uuids.txt | darwin-photos sync -
-  darwin-photos sync - < uuids.txt
-
-Sync all cloud-only photos:
-  darwin-photos sync --all
-  darwin-photos sync --all --workers 4
-  darwin-photos sync --all --limit 100
+  darwin-photos ls --cloud-only | darwin-photos sync -
 
 Note: Use 'sync' to download into your Photos library (uses local disk).
-Use 'export' to download directly to any directory (e.g., external drive).`,
+Use 'export' to download directly to any directory (e.g., external drive).
+Use 'backup' for incremental backups to external storage.`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runSync,
 }
 
 func init() {
 	rootCmd.AddCommand(syncCmd)
-	syncCmd.Flags().BoolVar(&syncAll, "all", false, "Sync all cloud-only photos")
 	syncCmd.Flags().StringVarP(&syncFile, "from-file", "f", "", "File containing UUIDs (one per line)")
 	syncCmd.Flags().IntVarP(&syncWorkers, "workers", "w", 16, "Number of parallel workers")
-	syncCmd.Flags().IntVarP(&syncLimit, "limit", "n", 0, "Limit number of photos to sync (0 = unlimited)")
-	syncCmd.Flags().StringVar(&syncStart, "start", "", "Start date (YYYY-MM-DD), inclusive")
-	syncCmd.Flags().StringVar(&syncEnd, "end", "", "End date (YYYY-MM-DD), inclusive")
 }
 
 func runSync(cmd *cobra.Command, args []string) error {
-	// All mode: all cloud-only photos
-	if syncAll {
-		if len(args) != 0 || syncFile != "" {
-			return fmt.Errorf("--all cannot be combined with UUID or --from-file")
-		}
-		return runSyncAll()
-	}
-
 	// File input mode
 	if syncFile != "" {
 		if len(args) != 0 {
@@ -96,64 +75,9 @@ func runSync(cmd *cobra.Command, args []string) error {
 
 	// Single UUID mode
 	if len(args) != 1 {
-		return fmt.Errorf("requires a UUID, --from-file, or --all")
+		return fmt.Errorf("requires a UUID, --from-file, or -")
 	}
 	return runSyncList([]string{args[0]})
-}
-
-func runSyncAll() error {
-	// Parse date filters
-	var startDate, endDate time.Time
-	var err error
-	if syncStart != "" {
-		startDate, err = time.Parse("2006-01-02", syncStart)
-		if err != nil {
-			return fmt.Errorf("invalid start date %q: use YYYY-MM-DD format", syncStart)
-		}
-	}
-	if syncEnd != "" {
-		endDate, err = time.Parse("2006-01-02", syncEnd)
-		if err != nil {
-			return fmt.Errorf("invalid end date %q: use YYYY-MM-DD format", syncEnd)
-		}
-	}
-
-	// Ensure Photos authorization
-	if err := photokit.EnsureAuthorized(); err != nil {
-		return err
-	}
-
-	// Open database
-	photosDB, err := db.Open(getLibraryPath())
-	if err != nil {
-		return fmt.Errorf("failed to open Photos database: %w", err)
-	}
-	defer photosDB.Close()
-
-	// Get cloud-only assets
-	opts := db.ListOptions{
-		CloudOnly: true,
-		Limit:     syncLimit,
-		StartDate: startDate,
-		EndDate:   endDate,
-	}
-	assets, total, err := db.ListAssets(photosDB.DB(), opts)
-	if err != nil {
-		return fmt.Errorf("failed to list assets: %w", err)
-	}
-
-	if len(assets) == 0 {
-		fmt.Println("No cloud-only photos to sync")
-		return nil
-	}
-
-	if syncLimit > 0 && syncLimit < total {
-		fmt.Printf("Syncing %d of %d cloud-only photos (limited)\n", len(assets), total)
-	} else {
-		fmt.Printf("Syncing %d cloud-only photos\n", len(assets))
-	}
-
-	return syncAssets(assets)
 }
 
 type syncResult struct {
