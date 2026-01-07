@@ -399,10 +399,12 @@ func exportWorker(client *icloud.Client, outputDir string, jobs <-chan exportJob
 			continue
 		}
 
-		filename := asset.Filename
-		if filename == "" {
-			filename = job.uuid // Fall back to UUID if no filename
+		// Use UUID as filename, preserving original extension
+		ext := filepath.Ext(asset.Filename)
+		if ext == "" {
+			ext = ".jpg" // Default extension if none available
 		}
+		filename := job.uuid + ext
 
 		outputPath := filepath.Join(outputDir, filename)
 
