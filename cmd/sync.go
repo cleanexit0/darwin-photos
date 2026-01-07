@@ -1,13 +1,10 @@
 package cmd
 
 import (
-	"bufio"
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/cleanexit0/darwin-photos/internal/db"
@@ -134,38 +131,6 @@ func syncViaPhotoKit(asset *models.Asset) error {
 	return nil
 }
 
-func readUUIDsFromFile(path string) ([]string, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open file: %w", err)
-	}
-	defer file.Close()
-
-	return parseUUIDs(bufio.NewScanner(file))
-}
-
-func readUUIDsFromStdin() ([]string, error) {
-	return parseUUIDs(bufio.NewScanner(os.Stdin))
-}
-
-func parseUUIDs(scanner *bufio.Scanner) ([]string, error) {
-	var uuids []string
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		uuids = append(uuids, line)
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("failed to read input: %w", err)
-	}
-	if len(uuids) == 0 {
-		return nil, fmt.Errorf("no UUIDs found in input")
-	}
-	return uuids, nil
-}
-
 func runSyncList(identifiers []string) error {
 	// Ensure Photos authorization
 	if err := photokit.EnsureAuthorized(); err != nil {
@@ -240,7 +205,7 @@ func syncAssets(assets []*models.Asset) error {
 	}()
 
 	// Track progress
-	var succeeded, failed int64
+	var succeeded, failed int
 	var failedItems []string
 	startTime := time.Now()
 	bar := NewProgressBar(count)
@@ -248,10 +213,10 @@ func syncAssets(assets []*models.Asset) error {
 	for result := range results {
 		bar.Add(1)
 		if result.err != nil {
-			atomic.AddInt64(&failed, 1)
+			failed++
 			failedItems = append(failedItems, fmt.Sprintf("%s: %v", result.filename, result.err))
 		} else {
-			atomic.AddInt64(&succeeded, 1)
+			succeeded++
 		}
 	}
 	bar.Finish()

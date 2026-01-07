@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"bufio"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -104,7 +103,7 @@ func runExport(cmd *cobra.Command, args []string) error {
 		}
 		outputDir = args[0]
 		var err error
-		uuids, err = readExportUUIDs(exportFile)
+		uuids, err = readUUIDsFromFile(exportFile)
 		if err != nil {
 			return err
 		}
@@ -115,7 +114,7 @@ func runExport(cmd *cobra.Command, args []string) error {
 	if len(args) == 2 && args[0] == "-" {
 		outputDir = args[1]
 		var err error
-		uuids, err = readExportUUIDsFromStdin()
+		uuids, err = readUUIDsFromStdin()
 		if err != nil {
 			return err
 		}
@@ -490,36 +489,4 @@ func validateExportDir(outputDir string) error {
 		return fmt.Errorf("output path is not a directory: %s", outputDir)
 	}
 	return nil
-}
-
-func readExportUUIDs(path string) ([]string, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open file: %w", err)
-	}
-	defer file.Close()
-
-	return parseExportUUIDs(bufio.NewScanner(file))
-}
-
-func readExportUUIDsFromStdin() ([]string, error) {
-	return parseExportUUIDs(bufio.NewScanner(os.Stdin))
-}
-
-func parseExportUUIDs(scanner *bufio.Scanner) ([]string, error) {
-	var uuids []string
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		uuids = append(uuids, line)
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("failed to read input: %w", err)
-	}
-	if len(uuids) == 0 {
-		return nil, fmt.Errorf("no UUIDs found in input")
-	}
-	return uuids, nil
 }
