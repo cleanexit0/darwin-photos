@@ -294,19 +294,21 @@ func syncAssets(assets []*models.Asset) error {
 	}()
 
 	// Track progress
-	var completed, succeeded, failed int64
+	var succeeded, failed int64
+	var failedItems []string
 	startTime := time.Now()
+	bar := NewProgressBar(count)
 
 	for result := range results {
-		completed++
+		bar.Add(1)
 		if result.err != nil {
 			atomic.AddInt64(&failed, 1)
-			fmt.Printf("[%d/%d] FAILED: %s - %v\n", completed, count, result.filename, result.err)
+			failedItems = append(failedItems, fmt.Sprintf("%s: %v", result.filename, result.err))
 		} else {
 			atomic.AddInt64(&succeeded, 1)
-			fmt.Printf("[%d/%d] OK: %s\n", completed, count, result.filename)
 		}
 	}
+	bar.Finish()
 
 	// Summary
 	elapsed := time.Since(startTime)
@@ -314,6 +316,9 @@ func syncAssets(assets []*models.Asset) error {
 	fmt.Printf("  Succeeded: %d\n", succeeded)
 	if failed > 0 {
 		fmt.Printf("  Failed:    %d\n", failed)
+		for _, item := range failedItems {
+			fmt.Printf("    - %s\n", item)
+		}
 	}
 
 	if failed > 0 {

@@ -386,24 +386,25 @@ func exportPhotos(client *icloud.Client, uuids []string, outputDir string) error
 		close(results)
 	}()
 
-	var completed, succeeded, failed, skipped int64
+	var succeeded, failed, skipped int64
 	var failedUUIDs []string
+	var failedItems []string
 	startTime := time.Now()
+	bar := NewProgressBar(count)
 
 	for result := range results {
-		completed++
+		bar.Add(1)
 		if result.err != nil {
 			atomic.AddInt64(&failed, 1)
 			failedUUIDs = append(failedUUIDs, result.uuid)
-			fmt.Printf("[%d/%d] FAILED: %s - %v\n", completed, count, result.uuid, result.err)
+			failedItems = append(failedItems, fmt.Sprintf("%s: %v", result.uuid, result.err))
 		} else if result.skipped {
 			atomic.AddInt64(&skipped, 1)
-			fmt.Printf("[%d/%d] SKIPPED: %s (already exists)\n", completed, count, result.filename)
 		} else {
 			atomic.AddInt64(&succeeded, 1)
-			fmt.Printf("[%d/%d] OK: %s\n", completed, count, result.filename)
 		}
 	}
+	bar.Finish()
 
 	elapsed := time.Since(startTime)
 	fmt.Printf("\nCompleted in %s\n", elapsed.Round(time.Millisecond))
@@ -413,6 +414,9 @@ func exportPhotos(client *icloud.Client, uuids []string, outputDir string) error
 	}
 	if failed > 0 {
 		fmt.Printf("  Failed:    %d\n", failed)
+		for _, item := range failedItems {
+			fmt.Printf("    - %s\n", item)
+		}
 
 		// Write failed UUIDs to ~/.darwin-photos/ with timestamp
 		failedFile, err := writeFailedUUIDs(failedUUIDs)
