@@ -97,7 +97,7 @@ func init() {
 
 	exportCmd.Flags().BoolVar(&exportAll, "all", false, "Export all cloud-only photos")
 	exportCmd.Flags().StringVarP(&exportFile, "from-file", "f", "", "File containing UUIDs (one per line)")
-	exportCmd.Flags().IntVarP(&exportWorkers, "workers", "w", 4, "Number of parallel workers")
+	exportCmd.Flags().IntVarP(&exportWorkers, "workers", "w", 16, "Number of parallel workers")
 	exportCmd.Flags().IntVarP(&exportLimit, "limit", "n", 0, "Limit number of photos to export (0 = unlimited)")
 	exportCmd.Flags().IntVarP(&exportRetry, "retry", "r", 3, "Number of retry attempts for failed downloads")
 }
@@ -252,11 +252,12 @@ func getICloudClient() (*icloud.Client, error) {
 
 	sessionPath := icloud.DefaultSessionPath()
 	if err := client.LoadSession(sessionPath); err != nil {
-		return nil, fmt.Errorf("not logged in. Run 'darwin-photos export login' first")
+		return nil, fmt.Errorf("not logged in. Run 'darwin-photos export import-cookies' first")
 	}
 
-	if !client.IsLoggedIn() {
-		return nil, fmt.Errorf("session expired. Run 'darwin-photos export login' to re-authenticate")
+	// Validate session with Apple servers before proceeding
+	if _, err := client.DiscoverPhotosURL(); err != nil {
+		return nil, fmt.Errorf("session validation failed: %w\nRun 'darwin-photos export import-cookies' with fresh cookies", err)
 	}
 
 	return client, nil
@@ -348,7 +349,6 @@ func exportPhotos(client *icloud.Client, uuids []string, outputDir string) error
 	defer photosDB.Close()
 
 	// Map UUIDs to CloudKit GUIDs
-	fmt.Println("Looking up CloudKit GUIDs...")
 	guidMap, err := db.GetCloudMasterGUIDs(photosDB.DB(), uuids)
 	if err != nil {
 		return fmt.Errorf("failed to look up CloudKit GUIDs: %w", err)
@@ -369,12 +369,6 @@ func exportPhotos(client *icloud.Client, uuids []string, outputDir string) error
 	}
 
 	count := len(validJobs)
-	fmt.Printf("Found %d photos with CloudKit GUIDs\n", count)
-	fmt.Printf("Using %d workers\n", exportWorkers)
-	if exportRetry > 0 {
-		fmt.Printf("Retries: %d per photo\n", exportRetry)
-	}
-	fmt.Println()
 
 	config := &exportConfig{
 		maxRetries: exportRetry,

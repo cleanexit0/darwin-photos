@@ -193,7 +193,7 @@ func (c *Client) DiscoverPhotosURL() (string, error) {
 func (c *Client) tryDiscoverURL(setupEndpoint string, depth int) (string, error) {
 	// Prevent infinite recursion
 	if depth > 3 {
-		return "", fmt.Errorf("too many redirects (depth %d)", depth)
+		return "", fmt.Errorf("too many redirects (depth %d) - session may be invalid, please export fresh cookies from your browser", depth)
 	}
 
 	// Build validate URL with required query parameters

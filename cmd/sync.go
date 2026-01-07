@@ -56,7 +56,7 @@ func init() {
 	rootCmd.AddCommand(syncCmd)
 	syncCmd.Flags().BoolVar(&syncAll, "all", false, "Sync all cloud-only photos")
 	syncCmd.Flags().StringVarP(&syncFile, "from-file", "f", "", "File containing UUIDs (one per line)")
-	syncCmd.Flags().IntVarP(&syncWorkers, "workers", "w", 4, "Number of parallel workers")
+	syncCmd.Flags().IntVarP(&syncWorkers, "workers", "w", 16, "Number of parallel workers")
 	syncCmd.Flags().IntVarP(&syncLimit, "limit", "n", 0, "Limit number of photos to sync (0 = unlimited)")
 }
 
