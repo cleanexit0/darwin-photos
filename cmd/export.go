@@ -32,9 +32,14 @@ This downloads photos directly from iCloud servers, allowing you to export to
 external storage without filling up local disk space.
 
 Setup (import cookies from your browser):
-  1. Log into icloud.com or icloud.com.cn in Chrome
-  2. Use a cookie export extension to save cookies (Netscape format)
-  3. Run: darwin-photos export import-cookies cookies.txt
+  1. Log into icloud.com (or icloud.com.cn for China) in your browser
+  2. Navigate to Photos to ensure photo cookies are loaded
+  3. Export cookies using a browser extension:
+     - Chrome: "Get cookies.txt LOCALLY" extension
+     - Firefox: "cookies.txt" extension
+     - Safari: "ExportCookies" from github.com/nickvdyck/ExportCookies
+  4. Export cookies for "icloud.com" domain (Netscape/Cookies.txt format)
+  5. Run: darwin-photos export import-cookies cookies.txt
 
 Commands:
   darwin-photos export import-cookies <cookie-file>  # Import browser cookies
