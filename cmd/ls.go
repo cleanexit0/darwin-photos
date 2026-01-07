@@ -6,10 +6,9 @@ import (
 	"os"
 	"text/tabwriter"
 
-	"github.com/dustin/go-humanize"
-	"github.com/spf13/cobra"
 	"github.com/cleanexit0/darwin-photos/internal/db"
 	"github.com/cleanexit0/darwin-photos/internal/models"
+	"github.com/spf13/cobra"
 )
 
 var (
@@ -158,7 +157,7 @@ func outputLsPlain(assets []*models.Asset, total int) error {
 			date = a.DateCreated.Format("Jan _2 15:04")
 		}
 
-		size := humanize.Bytes(uint64(a.FileSize))
+		size := formatBytes(a.FileSize)
 
 		// Status: L=local, C=cloud-only
 		status := "L"

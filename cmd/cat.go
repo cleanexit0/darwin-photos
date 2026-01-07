@@ -6,10 +6,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/dustin/go-humanize"
-	"github.com/spf13/cobra"
 	"github.com/cleanexit0/darwin-photos/internal/db"
 	"github.com/cleanexit0/darwin-photos/internal/models"
+	"github.com/spf13/cobra"
 )
 
 var (
@@ -149,7 +148,7 @@ func outputFormatted(asset *models.Asset, ext *models.ExtendedAttributes, albums
 		fmt.Printf("current:   %s\n", asset.Filename)
 	}
 	fmt.Printf("type:      %s (%s)\n", asset.TypeString(), asset.UniformTypeID)
-	fmt.Printf("size:      %s (%d)\n", humanize.Bytes(uint64(asset.FileSize)), asset.FileSize)
+	fmt.Printf("size:      %s (%d bytes)\n", formatBytes(asset.FileSize), asset.FileSize)
 	if asset.Width > 0 && asset.Height > 0 {
 		fmt.Printf("dims:      %dx%d\n", asset.Width, asset.Height)
 	}
