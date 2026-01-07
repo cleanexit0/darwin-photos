@@ -52,7 +52,9 @@ func (p *ProgressBar) draw() {
 		eta = fmt.Sprintf(" ETA %s", formatDuration(remaining))
 	}
 
-	fmt.Printf("\r[%s] %d/%d (%.0f%%)%s", bar, p.completed, p.total, pct*100, eta)
+	// Pad with spaces to overwrite previous longer output
+	output := fmt.Sprintf("\r[%s] %d/%d (%.0f%%)%s", bar, p.completed, p.total, pct*100, eta)
+	fmt.Printf("%-70s", output)
 }
 
 // Finish completes the progress bar and moves to a new line.
