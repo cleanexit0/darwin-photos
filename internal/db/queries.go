@@ -50,10 +50,51 @@ type ListOptions struct {
 	SortDescending bool
 	StartDate      time.Time // Include photos on or after this date (inclusive)
 	EndDate        time.Time // Include photos on or before this date (inclusive)
+	AlbumName      string    // Filter by album name (exact match, case-sensitive)
+}
+
+// getAlbumRelationNumber discovers the dynamic album-asset relationship number.
+// The Photos database uses tables like Z_30ASSETS with columns Z_30ALBUMS and Z_3ASSETS.
+// The number (e.g., 30) varies by macOS version, while Z_3ASSETS is constant.
+// Returns -1 if the relationship table doesn't exist.
+func getAlbumRelationNumber(db *sql.DB) (int, error) {
+	var tableName string
+	err := db.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name GLOB 'Z_[0-9]*ASSETS' LIMIT 1`).Scan(&tableName)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return -1, nil
+		}
+		return -1, err
+	}
+
+	// Extract number from table name (e.g., Z_30ASSETS -> 30)
+	numStr := strings.TrimPrefix(tableName, "Z_")
+	numStr = strings.TrimSuffix(numStr, "ASSETS")
+
+	var num int
+	_, err = fmt.Sscanf(numStr, "%d", &num)
+	if err != nil {
+		return -1, fmt.Errorf("failed to parse album relation number from %q: %w", tableName, err)
+	}
+
+	return num, nil
 }
 
 // ListAssets returns a list of assets based on the options
 func ListAssets(db *sql.DB, opts ListOptions) ([]*models.Asset, int, error) {
+	// Discover album relationship number if filtering by album
+	var albumRelNum int = -1
+	if opts.AlbumName != "" {
+		var err error
+		albumRelNum, err = getAlbumRelationNumber(db)
+		if err != nil {
+			return nil, 0, fmt.Errorf("failed to discover album table: %w", err)
+		}
+		if albumRelNum < 0 {
+			return nil, 0, fmt.Errorf("album relationship table not found in database")
+		}
+	}
+
 	// Build the query - use subquery to get the largest resource (original) per asset
 	// Note: CAST timestamps AS REAL to prevent sqlite3 driver from auto-converting to time.Time
 	query := `
@@ -87,9 +128,24 @@ SELECT
      ORDER BY r.ZDATALENGTH DESC LIMIT 1) as data_length
 FROM ZASSET a
 LEFT JOIN ZADDITIONALASSETATTRIBUTES aa ON a.ZADDITIONALATTRIBUTES = aa.Z_PK
-WHERE 1=1
 `
 	var args []interface{}
+
+	// Add album JOINs if filtering by album
+	if opts.AlbumName != "" {
+		query += fmt.Sprintf(`JOIN Z_%dASSETS rel ON a.Z_PK = rel.Z_3ASSETS
+JOIN ZGENERICALBUM alb ON rel.Z_%dALBUMS = alb.Z_PK
+`, albumRelNum, albumRelNum)
+	}
+
+	query += `WHERE 1=1
+`
+
+	// Filter by album
+	if opts.AlbumName != "" {
+		query += " AND alb.ZTITLE = ? AND alb.ZKIND = 2"
+		args = append(args, opts.AlbumName)
+	}
 
 	// Filter by trashed state
 	if !opts.IncludeTrashed {
@@ -235,8 +291,22 @@ WHERE 1=1
 	}
 
 	// Get total count (without pagination)
-	countQuery := `SELECT COUNT(*) FROM ZASSET a WHERE 1=1`
+	countQuery := `SELECT COUNT(*) FROM ZASSET a `
 	var countArgs []interface{}
+
+	// Add album JOINs to count query if filtering by album
+	if opts.AlbumName != "" {
+		countQuery += fmt.Sprintf(`JOIN Z_%dASSETS rel ON a.Z_PK = rel.Z_3ASSETS
+JOIN ZGENERICALBUM alb ON rel.Z_%dALBUMS = alb.Z_PK `, albumRelNum, albumRelNum)
+	}
+
+	countQuery += `WHERE 1=1`
+
+	// Filter by album in count
+	if opts.AlbumName != "" {
+		countQuery += " AND alb.ZTITLE = ? AND alb.ZKIND = 2"
+		countArgs = append(countArgs, opts.AlbumName)
+	}
 	if !opts.IncludeTrashed {
 		countQuery += " AND (a.ZTRASHEDSTATE = 0 OR a.ZTRASHEDSTATE IS NULL)"
 	}
@@ -438,26 +508,19 @@ WHERE a.Z_PK = ?
 
 // GetAlbumsForAsset returns albums that contain the given asset
 func GetAlbumsForAsset(db *sql.DB, assetPK int64) ([]*models.Album, error) {
-	// Find the album-asset relationship table (name varies by macOS version, e.g., Z_30ASSETS)
-	var tableName string
-	err := db.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name GLOB 'Z_[0-9]*ASSETS' LIMIT 1`).Scan(&tableName)
-	if err != nil {
+	albumRelNum, err := getAlbumRelationNumber(db)
+	if err != nil || albumRelNum < 0 {
 		return nil, nil
 	}
 
-	// Derive column name from table name (e.g., Z_30ASSETS -> Z_30ALBUMS)
-	numStr := strings.TrimPrefix(tableName, "Z_")
-	numStr = strings.TrimSuffix(numStr, "ASSETS")
-	albumCol := "Z_" + numStr + "ALBUMS"
-
-	query := `
+	query := fmt.Sprintf(`
 SELECT alb.Z_PK, alb.ZUUID, alb.ZTITLE
 FROM ZGENERICALBUM alb
-JOIN ` + tableName + ` rel ON alb.Z_PK = rel.` + albumCol + `
+JOIN Z_%dASSETS rel ON alb.Z_PK = rel.Z_%dALBUMS
 WHERE rel.Z_3ASSETS = ?
   AND alb.ZKIND = 2
   AND alb.ZTITLE IS NOT NULL
-`
+`, albumRelNum, albumRelNum)
 	rows, err := db.Query(query, assetPK)
 	if err != nil {
 		return nil, nil

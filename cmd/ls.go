@@ -25,6 +25,7 @@ var (
 	lsJSON       bool
 	lsStart      string
 	lsEnd        string
+	lsAlbum      string
 )
 
 var lsCmd = &cobra.Command{
@@ -51,6 +52,7 @@ func init() {
 	lsCmd.Flags().BoolVar(&lsJSON, "json", false, "Output as JSON")
 	lsCmd.Flags().StringVar(&lsStart, "start", "", "Start date (YYYY-MM-DD), inclusive")
 	lsCmd.Flags().StringVar(&lsEnd, "end", "", "End date (YYYY-MM-DD), inclusive")
+	lsCmd.Flags().StringVar(&lsAlbum, "album", "", "Filter by album name (exact match)")
 }
 
 func runLs(cmd *cobra.Command, args []string) error {
@@ -90,6 +92,7 @@ func runLs(cmd *cobra.Command, args []string) error {
 		SortDescending: lsDesc,
 		StartDate:      startDate,
 		EndDate:        endDate,
+		AlbumName:      lsAlbum,
 	}
 
 	// Query assets
