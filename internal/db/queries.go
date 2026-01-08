@@ -455,16 +455,21 @@ func GetAlbumsForAsset(db *sql.DB, assetPK int64) ([]*models.Album, error) {
 			continue
 		}
 
-		// Try to find the correct column names
+		// Extract the number from the table name (e.g., "Z_30ASSETS" -> "30")
+		// to construct the correct album column name (e.g., "Z_30ALBUMS")
+		numStr := strings.TrimPrefix(tableName, "Z_")
+		numStr = strings.TrimSuffix(numStr, "ASSETS")
+		albumCol := "Z_" + numStr + "ALBUMS"
+
 		query := `
 SELECT alb.Z_PK, alb.ZUUID, alb.ZTITLE
 FROM ZGENERICALBUM alb
-JOIN ` + tableName + ` rel ON alb.Z_PK = rel.Z_26ALBUMS OR alb.Z_PK = rel.Z_27ALBUMS OR alb.Z_PK = rel.Z_28ALBUMS OR alb.Z_PK = rel.Z_29ALBUMS OR alb.Z_PK = rel.Z_30ALBUMS OR alb.Z_PK = rel.Z_31ALBUMS OR alb.Z_PK = rel.Z_32ALBUMS OR alb.Z_PK = rel.Z_33ALBUMS OR alb.Z_PK = rel.Z_34ALBUMS
-WHERE (rel.Z_3ASSETS = ? OR rel.Z_26ASSETS = ? OR rel.Z_27ASSETS = ? OR rel.Z_28ASSETS = ?)
+JOIN ` + tableName + ` rel ON alb.Z_PK = rel.` + albumCol + `
+WHERE rel.Z_3ASSETS = ?
   AND alb.ZKIND = 2
   AND alb.ZTITLE IS NOT NULL
 `
-		rows, err := db.Query(query, assetPK, assetPK, assetPK, assetPK)
+		rows, err := db.Query(query, assetPK)
 		if err != nil {
 			continue
 		}
