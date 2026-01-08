@@ -630,3 +630,33 @@ WHERE a.ZUUID IN (%s)
 	}
 	return result, totalBytes, rows.Err()
 }
+
+// ListAlbums returns all user-created albums
+func ListAlbums(db *sql.DB) ([]*models.Album, error) {
+	query := `
+SELECT Z_PK, ZUUID, ZTITLE
+FROM ZGENERICALBUM
+WHERE ZKIND = 2 AND ZTITLE IS NOT NULL
+ORDER BY ZTITLE
+`
+	rows, err := db.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var albums []*models.Album
+	for rows.Next() {
+		alb := &models.Album{}
+		var uuid sql.NullString
+		var title sql.NullString
+		if err := rows.Scan(&alb.PK, &uuid, &title); err != nil {
+			return nil, err
+		}
+		alb.UUID = uuid.String
+		alb.Title = title.String
+		albums = append(albums, alb)
+	}
+
+	return albums, rows.Err()
+}
