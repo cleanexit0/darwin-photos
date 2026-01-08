@@ -97,7 +97,10 @@ WHERE 1=1
 	}
 
 	// Filter by local/cloud availability (using subquery)
-	// Exclude ghost entries by requiring ZFINGERPRINT (content hash) to exist
+	// Exclude ghost entries by requiring ZFINGERPRINT (content hash) to exist.
+	// Edge case: If an asset has ONLY ghost entries, the subquery returns NULL, causing
+	// LocalAvailability to be 0 (unknown). This is intentional - such assets should be
+	// treated as cloud-only since no valid local resource exists.
 	if opts.LocalOnly {
 		query += " AND (SELECT r.ZLOCALAVAILABILITY FROM ZINTERNALRESOURCE r WHERE r.ZASSET = a.Z_PK AND r.ZRESOURCETYPE = 0 AND r.ZFINGERPRINT IS NOT NULL AND r.ZFINGERPRINT != '' ORDER BY r.ZDATALENGTH DESC LIMIT 1) = 1"
 	} else if opts.CloudOnly {
@@ -546,6 +549,7 @@ SELECT a.ZUUID,
        COALESCE(
            (SELECT r.ZDATALENGTH FROM ZINTERNALRESOURCE r
             WHERE r.ZASSET = a.Z_PK AND r.ZRESOURCETYPE = 0
+              AND r.ZFINGERPRINT IS NOT NULL AND r.ZFINGERPRINT != ''
             ORDER BY r.ZDATALENGTH DESC LIMIT 1),
            aa.ZORIGINALFILESIZE,
            0
