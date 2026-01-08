@@ -1,14 +1,27 @@
 # 🦤 darwin-photos
 
-> Back up iCloud Photos to external storage — without downloading everything to your Mac first.
+> Back up iCloud Photos to external storage — without bloating your Mac. Much faster. Progress bar included.
 
 ## The problem
 
-iCloud Photos' "Optimize Storage" saves disk space, but your full-resolution photos only exist in the cloud. Apple provides no easy way to back them up to external storage without first downloading everything to your Mac.
+> be me.
+> 500GB of photos on iCloud.
+> "Optimize Storage" on because MacBook only has 512GB.
+> want a full copy on external drive. just to be safe.
+
+Your options:
+
+1. **"Download Originals"** — bloat your MacBook with 500GB of photos. runs in background. is it working? who knows. takes days. no progress bar. just vibes. then copy to external, turn Optimize back on, wait another week for re-upload.
+2. **icloud.com** — manually select and download. flaky. slow. good luck.
 
 ## The solution
 
-**darwin-photos** backs up your entire iCloud Photos library to an external drive while keeping your Mac set to "Optimize Storage".
+> read local Photos database.
+> figure out what's on disk vs what's cloud-only.
+> local files? copy directly to external. fast.
+> cloud-only? grab your icloud.com cookies, download via API. progress bar. ETA. confidence.
+> keep "Optimize Storage" on the whole time.
+> profit.
 
 ```
 $ darwin-photos backup /Volumes/External/photos-backup
@@ -19,9 +32,7 @@ Local copies: 1,203 | Cloud downloads: 3,353
 [████████████████░░░░] 67% | 28.4GB/42.3GB | 156 MB/s | ETA 2m
 ```
 
-It reads your local Photos database and uses iCloud's web API to download originals — no re-authentication needed after initial cookie import.
-
-Beyond backups, it's a full-fledged CLI for Apple Photos: list photos, filter by date or album, inspect metadata, and more.
+Beyond backups, it's a full CLI for Apple Photos: list photos, filter by date/album, inspect metadata, and more.
 
 ## Installation
 
