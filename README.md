@@ -5,8 +5,11 @@
 ## The problem
 
 > be me.
+>
 > 500GB of photos on iCloud.
+>
 > "Optimize Storage" on because MacBook only has 512GB.
+>
 > want a full copy on external drive. just to be safe.
 
 Your options:
@@ -17,11 +20,14 @@ Your options:
 ## The solution
 
 > read local Photos database.
+>
 > figure out what's on disk vs what's cloud-only.
+>
 > local files? copy directly to external. fast.
+>
 > cloud-only? grab your icloud.com cookies, download via API. progress bar. ETA. confidence.
+>
 > keep "Optimize Storage" on the whole time.
-> profit.
 
 ```
 $ darwin-photos backup /Volumes/External/photos-backup
