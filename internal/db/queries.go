@@ -438,30 +438,19 @@ WHERE a.Z_PK = ?
 
 // GetAlbumsForAsset returns albums that contain the given asset
 func GetAlbumsForAsset(db *sql.DB, assetPK int64) ([]*models.Album, error) {
-	// The relationship table name varies by macOS version
-	// Try common table patterns
-	tables := []string{
-		"Z_26ASSETS", "Z_27ASSETS", "Z_28ASSETS", "Z_29ASSETS", "Z_30ASSETS",
-		"Z_31ASSETS", "Z_32ASSETS", "Z_33ASSETS", "Z_34ASSETS",
+	// Find the album-asset relationship table (name varies by macOS version, e.g., Z_30ASSETS)
+	var tableName string
+	err := db.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name GLOB 'Z_[0-9]*ASSETS' LIMIT 1`).Scan(&tableName)
+	if err != nil {
+		return nil, nil
 	}
 
-	var albums []*models.Album
+	// Derive column name from table name (e.g., Z_30ASSETS -> Z_30ALBUMS)
+	numStr := strings.TrimPrefix(tableName, "Z_")
+	numStr = strings.TrimSuffix(numStr, "ASSETS")
+	albumCol := "Z_" + numStr + "ALBUMS"
 
-	for _, tableName := range tables {
-		// Check if table exists
-		var exists int
-		err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, tableName).Scan(&exists)
-		if err != nil || exists == 0 {
-			continue
-		}
-
-		// Extract the number from the table name (e.g., "Z_30ASSETS" -> "30")
-		// to construct the correct album column name (e.g., "Z_30ALBUMS")
-		numStr := strings.TrimPrefix(tableName, "Z_")
-		numStr = strings.TrimSuffix(numStr, "ASSETS")
-		albumCol := "Z_" + numStr + "ALBUMS"
-
-		query := `
+	query := `
 SELECT alb.Z_PK, alb.ZUUID, alb.ZTITLE
 FROM ZGENERICALBUM alb
 JOIN ` + tableName + ` rel ON alb.Z_PK = rel.` + albumCol + `
@@ -469,28 +458,23 @@ WHERE rel.Z_3ASSETS = ?
   AND alb.ZKIND = 2
   AND alb.ZTITLE IS NOT NULL
 `
-		rows, err := db.Query(query, assetPK)
-		if err != nil {
+	rows, err := db.Query(query, assetPK)
+	if err != nil {
+		return nil, nil
+	}
+	defer rows.Close()
+
+	var albums []*models.Album
+	for rows.Next() {
+		alb := &models.Album{}
+		var title sql.NullString
+		var uuid sql.NullString
+		if err := rows.Scan(&alb.PK, &uuid, &title); err != nil {
 			continue
 		}
-
-		for rows.Next() {
-			alb := &models.Album{}
-			var title sql.NullString
-			var uuid sql.NullString
-			err := rows.Scan(&alb.PK, &uuid, &title)
-			if err != nil {
-				continue
-			}
-			alb.UUID = uuid.String
-			alb.Title = title.String
-			albums = append(albums, alb)
-		}
-		rows.Close()
-
-		if len(albums) > 0 {
-			break
-		}
+		alb.UUID = uuid.String
+		alb.Title = title.String
+		albums = append(albums, alb)
 	}
 
 	return albums, nil
