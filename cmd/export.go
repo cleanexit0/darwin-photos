@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -283,7 +282,6 @@ type exportJob struct {
 type exportResult struct {
 	uuid          string
 	filename      string
-	skipped       bool
 	downloadBytes int64
 	err           error
 }
@@ -353,19 +351,50 @@ func downloadFromCloud(client *icloud.Client, uuids []string, sizeMap map[string
 		return nil, nil
 	}
 
-	count := len(validJobs)
+	// Scan output directory once to find existing files
+	entries, _ := os.ReadDir(config.outputDir)
+	existingUUIDs := make(map[string]bool)
+	for _, e := range entries {
+		name := e.Name()
+		uuid := strings.TrimSuffix(name, filepath.Ext(name))
+		existingUUIDs[uuid] = true
+	}
+
+	// Pre-filter jobs that already exist
+	var jobsToDownload []exportJob
+	var skippedBytes int64
+	var skipped int
+	for _, job := range validJobs {
+		if existingUUIDs[job.uuid] {
+			skipped++
+			skippedBytes += job.fileSize
+		} else {
+			jobsToDownload = append(jobsToDownload, job)
+		}
+	}
+
+	if len(jobsToDownload) == 0 {
+		fmt.Printf("All %d files already exist in output directory\n", skipped)
+		return nil, nil
+	}
+
+	if skipped > 0 {
+		fmt.Printf("Skipping %d files that already exist in output directory\n", skipped)
+	}
+
+	count := len(jobsToDownload)
+	downloadBytes := validTotalBytes - skippedBytes
 
 	jobs := make(chan exportJob, count)
 	results := make(chan exportResult, count)
-	done := make(chan struct{})
 
 	var wg sync.WaitGroup
 	for w := 0; w < config.workers; w++ {
 		wg.Add(1)
-		go exportWorker(client, config, jobs, results, &wg, done)
+		go exportWorker(client, config, jobs, results, &wg)
 	}
 
-	for _, job := range validJobs {
+	for _, job := range jobsToDownload {
 		jobs <- job
 	}
 	close(jobs)
@@ -375,29 +404,18 @@ func downloadFromCloud(client *icloud.Client, uuids []string, sizeMap map[string
 		close(results)
 	}()
 
-	var succeeded, failed, skipped int
+	var succeeded, failed int
 	var failedUUIDs []string
 	var failedItems []string
 	startTime := time.Now()
-	bar := NewSizeProgressBar(count, validTotalBytes)
+	bar := NewSizeProgressBar(count, downloadBytes)
 
 	for result := range results {
 		if result.err != nil {
-			// Check for session invalidation - exit immediately
-			if errors.Is(result.err, icloud.ErrSessionInvalid) {
-				close(done) // Signal workers to stop
-				for range results {
-				} // Drain remaining results
-				bar.Finish()
-				return nil, fmt.Errorf("iCloud session has been invalidated by the server.\nPlease re-authenticate: darwin-photos export import-cookies <cookie-file>")
-			}
 			failed++
 			failedUUIDs = append(failedUUIDs, result.uuid)
 			failedItems = append(failedItems, fmt.Sprintf("%s: %v", result.uuid, result.err))
 			bar.AddBytes(1, 0) // Don't count failed bytes in progress
-		} else if result.skipped {
-			skipped++
-			bar.AddBytes(1, result.downloadBytes)
 		} else {
 			succeeded++
 			bar.AddBytes(1, result.downloadBytes)
@@ -451,16 +469,10 @@ func writeFailedUUIDs(uuids []string) (string, error) {
 	return path, nil
 }
 
-func exportWorker(client *icloud.Client, config *exportConfig, jobs <-chan exportJob, results chan<- exportResult, wg *sync.WaitGroup, done <-chan struct{}) {
+func exportWorker(client *icloud.Client, config *exportConfig, jobs <-chan exportJob, results chan<- exportResult, wg *sync.WaitGroup) {
 	defer wg.Done()
 
 	for job := range jobs {
-		// Check if we should stop early (e.g., session invalidation)
-		select {
-		case <-done:
-			return
-		default:
-		}
 		// Get download URL from iCloud using CloudKit GUID
 		asset, err := client.GetDownloadURL(job.cloudKitGUID)
 		if err != nil {
@@ -477,9 +489,9 @@ func exportWorker(client *icloud.Client, config *exportConfig, jobs <-chan expor
 
 		outputPath := filepath.Join(config.outputDir, filename)
 
-		// Check if file exists - skip if already present
+		// Check if file exists - skip if already present (safety check, should be pre-filtered)
 		if _, err := os.Stat(outputPath); err == nil {
-			results <- exportResult{uuid: job.uuid, filename: filename, skipped: true, downloadBytes: job.fileSize}
+			results <- exportResult{uuid: job.uuid, filename: filename, downloadBytes: job.fileSize}
 			continue
 		}
 
