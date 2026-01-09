@@ -631,6 +631,87 @@ WHERE a.ZUUID IN (%s)
 	return result, totalBytes, rows.Err()
 }
 
+// Stats holds aggregate statistics for the photo library
+type Stats struct {
+	TotalCount int
+	TotalSize  int64
+	LocalCount int
+	LocalSize  int64
+	CloudCount int
+	CloudSize  int64
+	PhotoCount int
+	PhotoSize  int64
+	VideoCount int
+	VideoSize  int64
+}
+
+// GetStats returns aggregate statistics for the photo library
+func GetStats(db *sql.DB) (*Stats, error) {
+	// Query aggregates count and size, grouped by local availability and asset kind
+	// Uses the same filtering logic as ListAssets (excludes trashed, ghost entries)
+	query := `
+SELECT
+    COALESCE((SELECT r.ZLOCALAVAILABILITY FROM ZINTERNALRESOURCE r
+     WHERE r.ZASSET = a.Z_PK AND r.ZRESOURCETYPE = 0
+       AND r.ZFINGERPRINT IS NOT NULL AND r.ZFINGERPRINT != ''
+     ORDER BY r.ZDATALENGTH DESC LIMIT 1), 0) as local_avail,
+    a.ZKIND,
+    COUNT(*) as cnt,
+    COALESCE(SUM(
+        COALESCE(
+            (SELECT r.ZDATALENGTH FROM ZINTERNALRESOURCE r
+             WHERE r.ZASSET = a.Z_PK AND r.ZRESOURCETYPE = 0
+               AND r.ZFINGERPRINT IS NOT NULL AND r.ZFINGERPRINT != ''
+             ORDER BY r.ZDATALENGTH DESC LIMIT 1),
+            aa.ZORIGINALFILESIZE,
+            0
+        )
+    ), 0) as total_size
+FROM ZASSET a
+LEFT JOIN ZADDITIONALASSETATTRIBUTES aa ON a.ZADDITIONALATTRIBUTES = aa.Z_PK
+WHERE (a.ZTRASHEDSTATE = 0 OR a.ZTRASHEDSTATE IS NULL)
+GROUP BY local_avail, a.ZKIND
+`
+	rows, err := db.Query(query)
+	if err != nil {
+		return nil, fmt.Errorf("stats query failed: %w", err)
+	}
+	defer rows.Close()
+
+	stats := &Stats{}
+	for rows.Next() {
+		var localAvail, kind int
+		var count int
+		var size int64
+		if err := rows.Scan(&localAvail, &kind, &count, &size); err != nil {
+			return nil, fmt.Errorf("scan error: %w", err)
+		}
+
+		stats.TotalCount += count
+		stats.TotalSize += size
+
+		// Local availability: 1 = local, -1 = cloud-only, 0 = unknown (treat as cloud)
+		if localAvail == 1 {
+			stats.LocalCount += count
+			stats.LocalSize += size
+		} else {
+			stats.CloudCount += count
+			stats.CloudSize += size
+		}
+
+		// Kind: 0 = photo, 1 = video
+		if kind == 0 {
+			stats.PhotoCount += count
+			stats.PhotoSize += size
+		} else {
+			stats.VideoCount += count
+			stats.VideoSize += size
+		}
+	}
+
+	return stats, rows.Err()
+}
+
 // ListAlbums returns all user-created albums
 func ListAlbums(db *sql.DB) ([]*models.Album, error) {
 	query := `
