@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -356,11 +357,12 @@ func downloadFromCloud(client *icloud.Client, uuids []string, sizeMap map[string
 
 	jobs := make(chan exportJob, count)
 	results := make(chan exportResult, count)
+	done := make(chan struct{})
 
 	var wg sync.WaitGroup
 	for w := 0; w < config.workers; w++ {
 		wg.Add(1)
-		go exportWorker(client, config, jobs, results, &wg)
+		go exportWorker(client, config, jobs, results, &wg, done)
 	}
 
 	for _, job := range validJobs {
@@ -381,6 +383,14 @@ func downloadFromCloud(client *icloud.Client, uuids []string, sizeMap map[string
 
 	for result := range results {
 		if result.err != nil {
+			// Check for session invalidation - exit immediately
+			if errors.Is(result.err, icloud.ErrSessionInvalid) {
+				close(done) // Signal workers to stop
+				for range results {
+				} // Drain remaining results
+				bar.Finish()
+				return nil, fmt.Errorf("iCloud session has been invalidated by the server.\nPlease re-authenticate: darwin-photos export import-cookies <cookie-file>")
+			}
 			failed++
 			failedUUIDs = append(failedUUIDs, result.uuid)
 			failedItems = append(failedItems, fmt.Sprintf("%s: %v", result.uuid, result.err))
@@ -441,10 +451,16 @@ func writeFailedUUIDs(uuids []string) (string, error) {
 	return path, nil
 }
 
-func exportWorker(client *icloud.Client, config *exportConfig, jobs <-chan exportJob, results chan<- exportResult, wg *sync.WaitGroup) {
+func exportWorker(client *icloud.Client, config *exportConfig, jobs <-chan exportJob, results chan<- exportResult, wg *sync.WaitGroup, done <-chan struct{}) {
 	defer wg.Done()
 
 	for job := range jobs {
+		// Check if we should stop early (e.g., session invalidation)
+		select {
+		case <-done:
+			return
+		default:
+		}
 		// Get download URL from iCloud using CloudKit GUID
 		asset, err := client.GetDownloadURL(job.cloudKitGUID)
 		if err != nil {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"strings"
 )
 
 // PhotoAsset represents a photo from iCloud Photos.
@@ -65,6 +66,10 @@ func (c *Client) GetDownloadURL(cloudKitGUID string) (*PhotoAsset, error) {
 	body, _ := io.ReadAll(resp.Body)
 
 	if resp.StatusCode >= 400 {
+		// Check for session invalidation - this is a permanent error requiring re-authentication
+		if resp.StatusCode == 421 && strings.Contains(string(body), "Invalid global session") {
+			return nil, fmt.Errorf("%w: %s", ErrSessionInvalid, string(body))
+		}
 		return nil, fmt.Errorf("cloudkit lookup failed (status %d): %s", resp.StatusCode, string(body))
 	}
 
