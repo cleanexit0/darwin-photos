@@ -633,40 +633,52 @@ WHERE a.ZUUID IN (%s)
 
 // Stats holds aggregate statistics for the photo library
 type Stats struct {
-	TotalCount int
-	TotalSize  int64
-	LocalCount int
-	LocalSize  int64
-	CloudCount int
-	CloudSize  int64
-	PhotoCount int
-	PhotoSize  int64
-	VideoCount int
-	VideoSize  int64
+	TotalCount     int
+	TotalSize      int64
+	OriginalSize   int64 // Size of ZRESOURCETYPE = 0 only
+	DerivativeSize int64 // Size of ZRESOURCETYPE > 0 (calculated as TotalSize - OriginalSize)
+	LocalCacheSize int64 // Size of cloud-only type 3 resources (JPEG previews, not in iCloud)
+	LocalCount     int
+	LocalSize      int64
+	CloudCount     int
+	CloudSize      int64
+	PhotoCount     int
+	PhotoSize      int64
+	VideoCount     int
+	VideoSize      int64
 }
 
 // GetStats returns aggregate statistics for the photo library
 func GetStats(db *sql.DB) (*Stats, error) {
 	// Query aggregates count and size, grouped by local availability and asset kind
 	// Uses the same filtering logic as ListAssets (excludes trashed, ghost entries)
+	// Counts both total size (all resources) and original size (ZRESOURCETYPE = 0 only)
 	query := `
 SELECT
     COALESCE((SELECT r.ZLOCALAVAILABILITY FROM ZINTERNALRESOURCE r
-     WHERE r.ZASSET = a.Z_PK AND r.ZRESOURCETYPE = 0
+     WHERE r.ZASSET = a.Z_PK
        AND r.ZFINGERPRINT IS NOT NULL AND r.ZFINGERPRINT != ''
      ORDER BY r.ZDATALENGTH DESC LIMIT 1), 0) as local_avail,
     a.ZKIND,
     COUNT(*) as cnt,
     COALESCE(SUM(
         COALESCE(
-            (SELECT r.ZDATALENGTH FROM ZINTERNALRESOURCE r
-             WHERE r.ZASSET = a.Z_PK AND r.ZRESOURCETYPE = 0
-               AND r.ZFINGERPRINT IS NOT NULL AND r.ZFINGERPRINT != ''
-             ORDER BY r.ZDATALENGTH DESC LIMIT 1),
+            (SELECT SUM(r.ZDATALENGTH) FROM ZINTERNALRESOURCE r
+             WHERE r.ZASSET = a.Z_PK
+               AND r.ZFINGERPRINT IS NOT NULL AND r.ZFINGERPRINT != ''),
             aa.ZORIGINALFILESIZE,
             0
         )
-    ), 0) as total_size
+    ), 0) as total_size,
+    COALESCE(SUM(
+        COALESCE(
+            (SELECT SUM(r.ZDATALENGTH) FROM ZINTERNALRESOURCE r
+             WHERE r.ZASSET = a.Z_PK AND r.ZRESOURCETYPE = 0
+               AND r.ZFINGERPRINT IS NOT NULL AND r.ZFINGERPRINT != ''),
+            aa.ZORIGINALFILESIZE,
+            0
+        )
+    ), 0) as original_size
 FROM ZASSET a
 LEFT JOIN ZADDITIONALASSETATTRIBUTES aa ON a.ZADDITIONALATTRIBUTES = aa.Z_PK
 WHERE (a.ZTRASHEDSTATE = 0 OR a.ZTRASHEDSTATE IS NULL)
@@ -682,13 +694,14 @@ GROUP BY local_avail, a.ZKIND
 	for rows.Next() {
 		var localAvail, kind int
 		var count int
-		var size int64
-		if err := rows.Scan(&localAvail, &kind, &count, &size); err != nil {
+		var size, originalSize int64
+		if err := rows.Scan(&localAvail, &kind, &count, &size, &originalSize); err != nil {
 			return nil, fmt.Errorf("scan error: %w", err)
 		}
 
 		stats.TotalCount += count
 		stats.TotalSize += size
+		stats.OriginalSize += originalSize
 
 		// Local availability: 1 = local, -1 = cloud-only, 0 = unknown (treat as cloud)
 		if localAvail == 1 {
@@ -707,6 +720,24 @@ GROUP BY local_avail, a.ZKIND
 			stats.VideoCount += count
 			stats.VideoSize += size
 		}
+	}
+
+	// Calculate derivative size (total - originals)
+	stats.DerivativeSize = stats.TotalSize - stats.OriginalSize
+
+	// Calculate local cache size (large type 3 resources - high-res JPEG previews for cloud photos)
+	// Type 3 resources >= 3 MB are high-resolution previews cached locally but not stored in iCloud
+	// Smaller type 3 resources are stored in iCloud for quick access
+	cacheQuery := `
+SELECT COALESCE(SUM(ZDATALENGTH), 0)
+FROM ZINTERNALRESOURCE
+WHERE ZRESOURCETYPE = 3
+  AND ZLOCALAVAILABILITY = -1
+  AND ZDATALENGTH >= 3145728
+  AND ZFINGERPRINT IS NOT NULL AND ZFINGERPRINT != ''
+`
+	if err := db.QueryRow(cacheQuery).Scan(&stats.LocalCacheSize); err != nil {
+		return nil, fmt.Errorf("local cache query failed: %w", err)
 	}
 
 	return stats, rows.Err()
