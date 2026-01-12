@@ -277,6 +277,8 @@ type exportJob struct {
 	uuid         string
 	cloudKitGUID string
 	fileSize     int64
+	dateCreated  time.Time
+	dateModified time.Time
 }
 
 type exportResult struct {
@@ -333,13 +335,26 @@ func downloadFromCloud(client *icloud.Client, uuids []string, sizeMap map[string
 		return nil, fmt.Errorf("failed to look up CloudKit GUIDs: %w", err)
 	}
 
+	// Look up asset dates for timestamp preservation
+	dateMap, err := db.GetAssetDates(photosDB.DB(), uuids)
+	if err != nil {
+		return nil, fmt.Errorf("failed to look up asset dates: %w", err)
+	}
+
 	// Filter to only UUIDs that have CloudKit GUIDs
 	var validJobs []exportJob
 	var validTotalBytes int64
 	for _, uuid := range uuids {
 		if guid, ok := guidMap[uuid]; ok {
 			fileSize := sizeMap[uuid]
-			validJobs = append(validJobs, exportJob{uuid: uuid, cloudKitGUID: guid, fileSize: fileSize})
+			dates := dateMap[uuid]
+			validJobs = append(validJobs, exportJob{
+				uuid:         uuid,
+				cloudKitGUID: guid,
+				fileSize:     fileSize,
+				dateCreated:  dates[0],
+				dateModified: dates[1],
+			})
 			validTotalBytes += fileSize
 		} else {
 			fmt.Printf("Warning: No CloudKit GUID found for %s (may be local-only)\n", uuid)
@@ -499,6 +514,15 @@ func exportWorker(client *icloud.Client, config *exportConfig, jobs <-chan expor
 		if err := client.DownloadPhotoWithRetry(asset.DownloadURL, outputPath, config.maxRetries); err != nil {
 			results <- exportResult{uuid: job.uuid, err: err}
 			continue
+		}
+
+		// Preserve original timestamps
+		if !job.dateModified.IsZero() {
+			atime := job.dateModified
+			if !job.dateCreated.IsZero() {
+				atime = job.dateCreated
+			}
+			os.Chtimes(outputPath, atime, job.dateModified)
 		}
 
 		results <- exportResult{uuid: job.uuid, filename: filename, downloadBytes: job.fileSize}

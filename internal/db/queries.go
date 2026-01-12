@@ -743,6 +743,45 @@ WHERE ZRESOURCETYPE = 3
 	return stats, rows.Err()
 }
 
+// GetAssetDates returns creation and modification dates for multiple asset UUIDs
+// Returns a map of UUID -> {DateCreated, DateModified}
+func GetAssetDates(db *sql.DB, uuids []string) (map[string][2]time.Time, error) {
+	if len(uuids) == 0 {
+		return make(map[string][2]time.Time), nil
+	}
+
+	// Build placeholders for IN clause
+	placeholders := make([]string, len(uuids))
+	args := make([]interface{}, len(uuids))
+	for i, uuid := range uuids {
+		placeholders[i] = "?"
+		args[i] = uuid
+	}
+
+	query := fmt.Sprintf(`
+SELECT ZUUID, CAST(ZDATECREATED AS REAL), CAST(ZMODIFICATIONDATE AS REAL)
+FROM ZASSET
+WHERE ZUUID IN (%s)
+`, strings.Join(placeholders, ", "))
+
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	result := make(map[string][2]time.Time)
+	for rows.Next() {
+		var uuid string
+		var dateCreated, dateModified interface{}
+		if err := rows.Scan(&uuid, &dateCreated, &dateModified); err != nil {
+			return nil, err
+		}
+		result[uuid] = [2]time.Time{parseTimestamp(dateCreated), parseTimestamp(dateModified)}
+	}
+	return result, rows.Err()
+}
+
 // ListAlbums returns all user-created albums
 func ListAlbums(db *sql.DB) ([]*models.Album, error) {
 	query := `

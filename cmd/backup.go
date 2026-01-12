@@ -233,6 +233,7 @@ func copyLocalFiles(assets []*models.Asset, outputDir string, totalBytes int64) 
 		asset   *models.Asset
 		srcPath string
 		dstPath string
+		modTime time.Time
 	}
 
 	type copyResult struct {
@@ -253,7 +254,7 @@ func copyLocalFiles(assets []*models.Asset, outputDir string, totalBytes int64) 
 		go func() {
 			defer wg.Done()
 			for job := range jobs {
-				err := copyFile(job.srcPath, job.dstPath)
+				err := copyFile(job.srcPath, job.dstPath, job.modTime)
 				results <- copyResult{
 					uuid:     job.asset.UUID,
 					fileSize: job.asset.FileSize,
@@ -271,7 +272,12 @@ func copyLocalFiles(assets []*models.Asset, outputDir string, totalBytes int64) 
 			ext = ".jpg"
 		}
 		dstPath := filepath.Join(outputDir, asset.UUID+ext)
-		jobs <- copyJob{asset: asset, srcPath: srcPath, dstPath: dstPath}
+		// Use DateModified as the file's modification time
+		modTime := asset.DateModified
+		if modTime.IsZero() {
+			modTime = asset.DateCreated
+		}
+		jobs <- copyJob{asset: asset, srcPath: srcPath, dstPath: dstPath, modTime: modTime}
 	}
 	close(jobs)
 
@@ -310,8 +316,8 @@ func copyLocalFiles(assets []*models.Asset, outputDir string, totalBytes int64) 
 	return failedUUIDs, nil
 }
 
-// copyFile copies a single file from src to dst
-func copyFile(src, dst string) error {
+// copyFile copies a single file from src to dst, preserving the given modification time
+func copyFile(src, dst string, modTime time.Time) error {
 	srcFile, err := os.Open(src)
 	if err != nil {
 		return err
@@ -329,7 +335,16 @@ func copyFile(src, dst string) error {
 		return err
 	}
 
-	return dstFile.Sync()
+	if err := dstFile.Sync(); err != nil {
+		return err
+	}
+
+	// Preserve original timestamp
+	if !modTime.IsZero() {
+		os.Chtimes(dst, modTime, modTime)
+	}
+
+	return nil
 }
 
 // downloadCloudFiles downloads cloud-only files from iCloud
