@@ -543,60 +543,93 @@ WHERE rel.Z_3ASSETS = ?
 	return albums, nil
 }
 
-// GetCloudMasterGUIDs returns CloudKit GUIDs for multiple asset UUIDs in a single query
+// sqlBatchSize is the maximum number of SQL variables per query batch.
+// SQLite default limit is 999 (SQLITE_MAX_VARIABLE_NUMBER).
+const sqlBatchSize = 500
+
+// GetCloudMasterGUIDs returns CloudKit GUIDs for multiple asset UUIDs.
+// Queries are batched to avoid exceeding SQLite's variable limit.
 func GetCloudMasterGUIDs(db *sql.DB, uuids []string) (map[string]string, error) {
 	if len(uuids) == 0 {
 		return make(map[string]string), nil
 	}
 
-	// Build placeholders for IN clause
-	placeholders := make([]string, len(uuids))
-	args := make([]interface{}, len(uuids))
-	for i, uuid := range uuids {
-		placeholders[i] = "?"
-		args[i] = uuid
-	}
+	result := make(map[string]string)
 
-	query := fmt.Sprintf(`
+	// Process in batches to avoid "too many SQL variables" error
+	for i := 0; i < len(uuids); i += sqlBatchSize {
+		end := i + sqlBatchSize
+		if end > len(uuids) {
+			end = len(uuids)
+		}
+		batch := uuids[i:end]
+
+		// Build placeholders for IN clause
+		placeholders := make([]string, len(batch))
+		args := make([]interface{}, len(batch))
+		for j, uuid := range batch {
+			placeholders[j] = "?"
+			args[j] = uuid
+		}
+
+		query := fmt.Sprintf(`
 SELECT a.ZUUID, cm.ZCLOUDMASTERGUID
 FROM ZASSET a
 JOIN ZCLOUDMASTER cm ON a.ZMASTER = cm.Z_PK
 WHERE a.ZUUID IN (%s) AND cm.ZCLOUDMASTERGUID IS NOT NULL AND cm.ZCLOUDMASTERGUID != ''
 `, strings.Join(placeholders, ", "))
 
-	rows, err := db.Query(query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	result := make(map[string]string)
-	for rows.Next() {
-		var uuid, guid string
-		if err := rows.Scan(&uuid, &guid); err != nil {
+		rows, err := db.Query(query, args...)
+		if err != nil {
 			return nil, err
 		}
-		result[uuid] = guid
+
+		for rows.Next() {
+			var uuid, guid string
+			if err := rows.Scan(&uuid, &guid); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			result[uuid] = guid
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
 	}
-	return result, rows.Err()
+
+	return result, nil
 }
 
-// GetAssetSizes returns file sizes for multiple asset UUIDs
-// Returns a map of UUID -> fileSize and total bytes
+// GetAssetSizes returns file sizes for multiple asset UUIDs.
+// Returns a map of UUID -> fileSize and total bytes.
+// Queries are batched to avoid exceeding SQLite's variable limit.
 func GetAssetSizes(db *sql.DB, uuids []string) (map[string]int64, int64, error) {
 	if len(uuids) == 0 {
 		return make(map[string]int64), 0, nil
 	}
 
-	// Build placeholders for IN clause
-	placeholders := make([]string, len(uuids))
-	args := make([]interface{}, len(uuids))
-	for i, uuid := range uuids {
-		placeholders[i] = "?"
-		args[i] = uuid
-	}
+	result := make(map[string]int64)
+	var totalBytes int64
 
-	query := fmt.Sprintf(`
+	// Process in batches to avoid "too many SQL variables" error
+	for i := 0; i < len(uuids); i += sqlBatchSize {
+		end := i + sqlBatchSize
+		if end > len(uuids) {
+			end = len(uuids)
+		}
+		batch := uuids[i:end]
+
+		// Build placeholders for IN clause
+		placeholders := make([]string, len(batch))
+		args := make([]interface{}, len(batch))
+		for j, uuid := range batch {
+			placeholders[j] = "?"
+			args[j] = uuid
+		}
+
+		query := fmt.Sprintf(`
 SELECT a.ZUUID,
        COALESCE(
            (SELECT r.ZDATALENGTH FROM ZINTERNALRESOURCE r
@@ -611,24 +644,29 @@ LEFT JOIN ZADDITIONALASSETATTRIBUTES aa ON a.ZADDITIONALATTRIBUTES = aa.Z_PK
 WHERE a.ZUUID IN (%s)
 `, strings.Join(placeholders, ", "))
 
-	rows, err := db.Query(query, args...)
-	if err != nil {
-		return nil, 0, err
-	}
-	defer rows.Close()
-
-	result := make(map[string]int64)
-	var totalBytes int64
-	for rows.Next() {
-		var uuid string
-		var fileSize int64
-		if err := rows.Scan(&uuid, &fileSize); err != nil {
+		rows, err := db.Query(query, args...)
+		if err != nil {
 			return nil, 0, err
 		}
-		result[uuid] = fileSize
-		totalBytes += fileSize
+
+		for rows.Next() {
+			var uuid string
+			var fileSize int64
+			if err := rows.Scan(&uuid, &fileSize); err != nil {
+				rows.Close()
+				return nil, 0, err
+			}
+			result[uuid] = fileSize
+			totalBytes += fileSize
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, 0, err
+		}
+		rows.Close()
 	}
-	return result, totalBytes, rows.Err()
+
+	return result, totalBytes, nil
 }
 
 // Stats holds aggregate statistics for the photo library
@@ -743,43 +781,60 @@ WHERE ZRESOURCETYPE = 3
 	return stats, rows.Err()
 }
 
-// GetAssetDates returns creation and modification dates for multiple asset UUIDs
-// Returns a map of UUID -> {DateCreated, DateModified}
+// GetAssetDates returns creation and modification dates for multiple asset UUIDs.
+// Returns a map of UUID -> {DateCreated, DateModified}.
+// Queries are batched to avoid exceeding SQLite's variable limit.
 func GetAssetDates(db *sql.DB, uuids []string) (map[string][2]time.Time, error) {
 	if len(uuids) == 0 {
 		return make(map[string][2]time.Time), nil
 	}
 
-	// Build placeholders for IN clause
-	placeholders := make([]string, len(uuids))
-	args := make([]interface{}, len(uuids))
-	for i, uuid := range uuids {
-		placeholders[i] = "?"
-		args[i] = uuid
-	}
+	result := make(map[string][2]time.Time)
 
-	query := fmt.Sprintf(`
+	// Process in batches to avoid "too many SQL variables" error
+	for i := 0; i < len(uuids); i += sqlBatchSize {
+		end := i + sqlBatchSize
+		if end > len(uuids) {
+			end = len(uuids)
+		}
+		batch := uuids[i:end]
+
+		// Build placeholders for IN clause
+		placeholders := make([]string, len(batch))
+		args := make([]interface{}, len(batch))
+		for j, uuid := range batch {
+			placeholders[j] = "?"
+			args[j] = uuid
+		}
+
+		query := fmt.Sprintf(`
 SELECT ZUUID, CAST(ZDATECREATED AS REAL), CAST(ZMODIFICATIONDATE AS REAL)
 FROM ZASSET
 WHERE ZUUID IN (%s)
 `, strings.Join(placeholders, ", "))
 
-	rows, err := db.Query(query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	result := make(map[string][2]time.Time)
-	for rows.Next() {
-		var uuid string
-		var dateCreated, dateModified interface{}
-		if err := rows.Scan(&uuid, &dateCreated, &dateModified); err != nil {
+		rows, err := db.Query(query, args...)
+		if err != nil {
 			return nil, err
 		}
-		result[uuid] = [2]time.Time{parseTimestamp(dateCreated), parseTimestamp(dateModified)}
+
+		for rows.Next() {
+			var uuid string
+			var dateCreated, dateModified interface{}
+			if err := rows.Scan(&uuid, &dateCreated, &dateModified); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			result[uuid] = [2]time.Time{parseTimestamp(dateCreated), parseTimestamp(dateModified)}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
 	}
-	return result, rows.Err()
+
+	return result, nil
 }
 
 // ListAlbums returns all user-created albums
